@@ -49,6 +49,7 @@
             ];
 
             buildInputs = with pkgs; [
+              gtk4
               tpm2-tss
             ];
           };
@@ -132,6 +133,7 @@
             env.SQLX_OFFLINE = "true";
 
             packages = with pkgs; [
+              gtk4
               pkg-config
               rustPlatform.bindgenHook
               sqlx-cli

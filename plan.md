@@ -41,6 +41,7 @@
 - [x] CTAP2 request handling accepts empty `allowCredentials` for discoverable passkey flows and rejects malformed `clientDataHash` lengths early.
 - [x] SQLite storage now uses normalized metadata, keyslot, and token tables for CTAP2 credentials.
 - [x] Daemon/user-session model is now explicit: a system daemon routes approvals against the active graphical session and logs session identity at startup.
+- [x] GTK approval and settings UI prototype exists as a standalone GTK4 control surface.
 
 ## In Progress
 
