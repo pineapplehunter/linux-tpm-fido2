@@ -38,6 +38,14 @@ pub struct PcrPolicyBinding {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryMaterial {
+    pub label: Option<String>,
+    pub passphrase_salt: Vec<u8>,
+    pub passphrase_hash: Vec<u8>,
+    pub key: TpmCredential,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TpmCredential {
     pub private: Vec<u8>,
     pub public: Vec<u8>,
@@ -92,6 +100,24 @@ impl Tpm {
 
     pub fn create_credential_key(&mut self) -> Result<TpmCredential> {
         self.create_credential_key_with_policy(None)
+    }
+
+    pub fn create_recovery_material(
+        &mut self,
+        label: Option<String>,
+        passphrase: &str,
+    ) -> Result<RecoveryMaterial> {
+        let mut passphrase_salt = vec![0u8; 32];
+        getrandom::fill(&mut passphrase_salt).wrap_err("generating recovery passphrase salt")?;
+        let key = self.create_credential_key()?;
+        let passphrase_hash = recovery_passphrase_hash(&passphrase_salt, passphrase);
+
+        Ok(RecoveryMaterial {
+            label,
+            passphrase_salt,
+            passphrase_hash,
+            key,
+        })
     }
 
     pub fn create_credential_key_with_policy(
@@ -354,6 +380,21 @@ fn secure_boot_pcr_selection_name() -> String {
     "sha256:7".to_owned()
 }
 
+pub fn recovery_passphrase_hash(passphrase_salt: &[u8], passphrase: &str) -> Vec<u8> {
+    let mut hasher = Sha256::new();
+    hasher.update(passphrase_salt);
+    hasher.update(passphrase.as_bytes());
+    hasher.finalize().to_vec()
+}
+
+pub fn recovery_passphrase_matches(
+    passphrase_salt: &[u8],
+    passphrase: &str,
+    expected_hash: &[u8],
+) -> bool {
+    recovery_passphrase_hash(passphrase_salt, passphrase) == expected_hash
+}
+
 fn ecdsa_der(r: &[u8], s: &[u8]) -> Vec<u8> {
     let r = der_integer(r);
     let s = der_integer(s);
@@ -384,4 +425,30 @@ fn der_integer(value: &[u8]) -> Vec<u8> {
     der.push(integer.len() as u8);
     der.extend_from_slice(&integer);
     der
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{recovery_passphrase_hash, recovery_passphrase_matches};
+
+    #[test]
+    fn recovery_passphrase_hash_is_deterministic() {
+        let salt = b"0123456789abcdef0123456789abcdef";
+        let hash = recovery_passphrase_hash(salt, "correct horse battery staple");
+
+        assert_eq!(
+            hash,
+            recovery_passphrase_hash(salt, "correct horse battery staple")
+        );
+        assert!(recovery_passphrase_matches(
+            salt,
+            "correct horse battery staple",
+            &hash
+        ));
+        assert!(!recovery_passphrase_matches(
+            salt,
+            "wrong horse battery staple",
+            &hash
+        ));
+    }
 }

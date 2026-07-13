@@ -4,14 +4,14 @@
 
 - This repo is starting a Linux TPM-backed FIDO2/WebAuthn passkey daemon; `README.md` is the current product sketch.
 - A Rust crate now exists. The current implementation is an early skeleton for UHID, CTAPHID, minimal CTAP2 `getInfo`, TPM placeholders, and project-local dev storage.
-- TPM signing, credential registration/assertion, persistent credential storage, recovery, and GUI are not fully implemented yet.
+- TPM signing, credential registration/assertion, persistent credential storage, and recovery-slot generation are implemented; GUI is not fully implemented yet.
 
 ## Project Direction
 
 - The daemon should expose a browser-usable FIDO2 authenticator, likely by presenting a Linux virtual HID/UHID device rather than a browser extension.
 - TPM 2.0 is the credential root: support PCR-bound credentials first for secure boot state, then configurable PCR selections.
 - Secure-boot PCR binding is wired into the current credential create/assert flow; configurable PCR selections still need follow-up work.
-- Recovery should use passphrase-unlocked material that remains TPM-bound but is not PCR-bound.
+- Recovery uses passphrase-unlocked material that remains TPM-bound but is not PCR-bound; the current path is env-controlled until GTK settings exist.
 - Planned UI is GTK: an authentication approval prompt plus a settings UI for passkey IDs and recovery passphrases.
 - Credential storage should take design cues from LUKS2 metadata: structured metadata, keyslots/tokens, and separation of encrypted secrets from unlock mechanisms.
 

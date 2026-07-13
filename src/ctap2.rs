@@ -1,4 +1,5 @@
 use std::{
+    env,
     path::PathBuf,
     thread,
     time::{Duration, Instant},
@@ -184,6 +185,36 @@ impl Authenticator {
             }
         };
         log::info!("created TPM-backed CTAP2 credential key");
+        let recovery = match env::var("LINUX_TPM_FIDO2_RECOVERY_PASSPHRASE") {
+            Ok(passphrase) if !passphrase.is_empty() => {
+                let label = env::var("LINUX_TPM_FIDO2_RECOVERY_LABEL")
+                    .ok()
+                    .filter(|label| !label.is_empty());
+                match tpm.create_recovery_material(label, &passphrase) {
+                    Ok(material) => {
+                        log::info!("created TPM recovery material for CTAP2 credential");
+                        Some(store::StoredRecoverySlot {
+                            label: material.label,
+                            passphrase_salt: material.passphrase_salt,
+                            passphrase_hash: material.passphrase_hash,
+                            key: store::StoredTpmKey {
+                                private: material.key.private,
+                                public: material.key.public,
+                                public_key_x: material.key.public_key_x,
+                                public_key_y: material.key.public_key_y,
+                            },
+                        })
+                    }
+                    Err(error) => {
+                        log::warn!(
+                            "failed to create TPM recovery material for CTAP2 credential: {error:?}"
+                        );
+                        return Err(ErrorStatus::OperationDenied);
+                    }
+                }
+            }
+            _ => None,
+        };
         let public_key = cose_credential_public_key(&key);
         let mut credential_id = vec![0u8; 32];
         fill_random(&mut credential_id);
@@ -200,7 +231,7 @@ impl Authenticator {
                 selection: policy.selection,
                 digest: policy.digest,
             }),
-            recovery: None,
+            recovery,
             sign_count: 0,
         });
         self.save_credentials();
