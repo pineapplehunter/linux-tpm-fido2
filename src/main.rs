@@ -1,7 +1,7 @@
 use std::{env, path::PathBuf, thread, time::Duration};
 
 use clap::Parser;
-use color_eyre::{Result, eyre::WrapErr};
+use color_eyre::{eyre::WrapErr, Result};
 use linux_tpm_fido2::{ctaphid, hid, store, tpm};
 use uhid_virt::{OutputEvent, StreamError, UHIDDevice};
 
@@ -32,13 +32,7 @@ fn main() -> Result<()> {
             config.tpm_path.display()
         );
     } else {
-        match tpm::Tpm::open(&config.tpm_path).and_then(|mut tpm| tpm.probe()) {
-            Ok(()) => log::info!("TPM device is accessible"),
-            Err(error) => log::warn!(
-                "warning: TPM device {} exists but probe failed: {error:?}",
-                config.tpm_path.display()
-            ),
-        }
+        log::info!("TPM device is accessible");
     }
 
     let mut device = UHIDDevice::create_with_path(hid::create_params(), &config.uhid_path)

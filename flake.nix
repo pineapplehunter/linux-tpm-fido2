@@ -90,6 +90,12 @@
 
               machine.succeed("kill $(cat /tmp/linux-tpm-fido2-smoke/daemon.pid)")
               machine.wait_until_succeeds("! kill -0 $(cat /tmp/linux-tpm-fido2-smoke/daemon.pid)")
+              machine.succeed("pkill -x linux-tpm-fido2 || true")
+
+              machine.succeed("nohup sh -c 'export RUST_LOG=debug; yes y | ${linux-tpm-fido2}/bin/linux-tpm-fido2 --tpm-path /dev/tpm0 --store-dir /tmp/linux-tpm-fido2-smoke/store' >/tmp/linux-tpm-fido2-smoke/daemon-restart.log 2>&1 & echo $! >/tmp/linux-tpm-fido2-smoke/daemon.pid")
+              machine.wait_until_succeeds("sh -c 'set -- /dev/hidraw*; [ $# -ge 2 ]'")
+
+              machine.succeed("sh -euc 'WORKDIR=/tmp/linux-tpm-fido2-smoke RP_ID=login.example.test ${linux-tpm-fido2-smoke}/bin/linux-tpm-fido2-smoke assert || { cat /tmp/linux-tpm-fido2-smoke/daemon-restart.log; exit 1; }'")
             '';
           };
         in

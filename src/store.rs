@@ -9,10 +9,7 @@ use color_eyre::{
     Result,
     eyre::{WrapErr, eyre},
 };
-use sqlx::{
-    Row, SqlitePool,
-    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
-};
+use sqlx::{SqlitePool, sqlite::{SqliteConnectOptions, SqlitePoolOptions}};
 
 pub const DEV_STORE_DIR: &str = ".linux-tpm-fido2-store";
 const CREDENTIALS_DATABASE_FILE: &str = "credentials.sqlite";
@@ -25,7 +22,23 @@ pub struct StoredCtap2Credential {
     pub user_name: Option<String>,
     pub user_display_name: Option<String>,
     pub key: StoredTpmKey,
+    pub policy: Option<StoredPcrPolicy>,
+    pub recovery: Option<StoredRecoverySlot>,
     pub sign_count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredPcrPolicy {
+    pub selection: String,
+    pub digest: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredRecoverySlot {
+    pub label: Option<String>,
+    pub passphrase_salt: Vec<u8>,
+    pub passphrase_hash: Vec<u8>,
+    pub key: StoredTpmKey,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,12 +101,15 @@ async fn load_ctap2_credentials_async(dir: &Path) -> Result<Vec<StoredCtap2Crede
     }
 
     let pool = open_database(dir).await?;
-    let rows = sqlx::query(
+    let rows = sqlx::query!(
         "SELECT c.credential_id, c.rp_id, c.user_handle, c.user_name, c.user_display_name, \
-                c.sign_count, k.tpm_private, k.tpm_public, k.public_key_x, k.public_key_y \
+                c.sign_count, c.policy_selection, c.policy_digest, \
+                c.recovery_label, c.recovery_passphrase_salt, c.recovery_passphrase_hash, \
+                c.recovery_tpm_private, c.recovery_tpm_public, c.recovery_public_key_x, c.recovery_public_key_y, \
+                k.tpm_private, k.tpm_public, k.public_key_x, k.public_key_y \
          FROM credentials c \
          JOIN tpm_keys k ON k.credential_id = c.credential_id \
-         ORDER BY c.rp_id, c.credential_id",
+         ORDER BY c.rp_id, c.credential_id"
     )
     .fetch_all(&pool)
     .await
@@ -101,21 +117,54 @@ async fn load_ctap2_credentials_async(dir: &Path) -> Result<Vec<StoredCtap2Crede
 
     rows.into_iter()
         .map(|row| {
-            let sign_count: i64 = row.try_get("sign_count")?;
             Ok(StoredCtap2Credential {
-                id: row.try_get("credential_id")?,
-                rp_id: row.try_get("rp_id")?,
-                user_handle: row.try_get("user_handle")?,
-                user_name: row.try_get("user_name")?,
-                user_display_name: row.try_get("user_display_name")?,
+                id: row.credential_id,
+                rp_id: row.rp_id,
+                user_handle: row.user_handle,
+                user_name: row.user_name,
+                user_display_name: row.user_display_name,
                 key: StoredTpmKey {
-                    private: row.try_get("tpm_private")?,
-                    public: row.try_get("tpm_public")?,
-                    public_key_x: row.try_get("public_key_x")?,
-                    public_key_y: row.try_get("public_key_y")?,
+                    private: row.tpm_private,
+                    public: row.tpm_public,
+                    public_key_x: row.public_key_x,
+                    public_key_y: row.public_key_y,
                 },
-                sign_count: u32::try_from(sign_count)
-                    .wrap_err_with(|| format!("invalid sign_count {sign_count}"))?,
+                policy: match (row.policy_selection, row.policy_digest) {
+                    (Some(selection), Some(digest)) => Some(StoredPcrPolicy { selection, digest }),
+                    _ => None,
+                },
+                recovery: match (
+                    row.recovery_label,
+                    row.recovery_passphrase_salt,
+                    row.recovery_passphrase_hash,
+                    row.recovery_tpm_private,
+                    row.recovery_tpm_public,
+                    row.recovery_public_key_x,
+                    row.recovery_public_key_y,
+                ) {
+                    (
+                        label,
+                        Some(passphrase_salt),
+                        Some(passphrase_hash),
+                        Some(private),
+                        Some(public),
+                        Some(public_key_x),
+                        Some(public_key_y),
+                    ) => Some(StoredRecoverySlot {
+                        label,
+                        passphrase_salt,
+                        passphrase_hash,
+                        key: StoredTpmKey {
+                            private,
+                            public,
+                            public_key_x,
+                            public_key_y,
+                        },
+                    }),
+                    _ => None,
+                },
+                sign_count: u32::try_from(row.sign_count)
+                    .wrap_err_with(|| format!("invalid sign_count {}", row.sign_count))?,
             })
         })
         .collect()
@@ -138,31 +187,42 @@ async fn save_ctap2_credentials_async(
         .wrap_err("clearing credential rows")?;
 
     for credential in credentials {
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO credentials \
-             (credential_id, rp_id, user_handle, user_name, user_display_name, sign_count) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+             (credential_id, rp_id, user_handle, user_name, user_display_name, sign_count, \
+              policy_selection, policy_digest, recovery_label, recovery_passphrase_salt, recovery_passphrase_hash, \
+              recovery_tpm_private, recovery_tpm_public, recovery_public_key_x, recovery_public_key_y) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            &credential.id,
+            &credential.rp_id,
+            &credential.user_handle,
+            credential.user_name.as_deref(),
+            credential.user_display_name.as_deref(),
+            i64::from(credential.sign_count),
+            credential.policy.as_ref().map(|policy| policy.selection.as_str()),
+            credential.policy.as_ref().map(|policy| policy.digest.as_slice()),
+            credential.recovery.as_ref().and_then(|recovery| recovery.label.as_deref()),
+            credential.recovery.as_ref().map(|recovery| recovery.passphrase_salt.as_slice()),
+            credential.recovery.as_ref().map(|recovery| recovery.passphrase_hash.as_slice()),
+            credential.recovery.as_ref().map(|recovery| recovery.key.private.as_slice()),
+            credential.recovery.as_ref().map(|recovery| recovery.key.public.as_slice()),
+            credential.recovery.as_ref().map(|recovery| recovery.key.public_key_x.as_slice()),
+            credential.recovery.as_ref().map(|recovery| recovery.key.public_key_y.as_slice()),
         )
-        .bind(&credential.id)
-        .bind(&credential.rp_id)
-        .bind(&credential.user_handle)
-        .bind(&credential.user_name)
-        .bind(&credential.user_display_name)
-        .bind(i64::from(credential.sign_count))
         .execute(&mut *tx)
         .await
         .wrap_err_with(|| format!("saving credential for rp_id={}", credential.rp_id))?;
 
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO tpm_keys \
              (credential_id, tpm_private, tpm_public, public_key_x, public_key_y) \
              VALUES (?1, ?2, ?3, ?4, ?5)",
+            &credential.id,
+            &credential.key.private,
+            &credential.key.public,
+            &credential.key.public_key_x,
+            &credential.key.public_key_y,
         )
-        .bind(&credential.id)
-        .bind(&credential.key.private)
-        .bind(&credential.key.public)
-        .bind(&credential.key.public_key_x)
-        .bind(&credential.key.public_key_y)
         .execute(&mut *tx)
         .await
         .wrap_err_with(|| format!("saving TPM key for rp_id={}", credential.rp_id))?;
@@ -179,13 +239,13 @@ async fn update_ctap2_sign_count_async(
     sign_count: u32,
 ) -> Result<()> {
     let pool = open_database(dir).await?;
-    let result = sqlx::query(
+    let result = sqlx::query!(
         "UPDATE credentials \
          SET sign_count = ?1, updated_at = CURRENT_TIMESTAMP \
          WHERE credential_id = ?2",
+        i64::from(sign_count),
+        credential_id,
     )
-    .bind(i64::from(sign_count))
-    .bind(credential_id)
     .execute(&pool)
     .await
     .wrap_err("updating CTAP2 credential sign_count")?;
@@ -268,6 +328,8 @@ mod tests {
                 public_key_x: vec![13; 32],
                 public_key_y: vec![14; 32],
             },
+            policy: None,
+            recovery: None,
             sign_count: 10,
         }];
 
@@ -294,6 +356,8 @@ mod tests {
                 public_key_x: vec![3; 32],
                 public_key_y: vec![4; 32],
             },
+            policy: None,
+            recovery: None,
             sign_count: 1,
         };
         let second = StoredCtap2Credential {
@@ -308,6 +372,8 @@ mod tests {
                 public_key_x: vec![7; 32],
                 public_key_y: vec![8; 32],
             },
+            policy: None,
+            recovery: None,
             sign_count: 2,
         };
 
@@ -373,6 +439,8 @@ mod tests {
                 public_key_x: vec![7; 32],
                 public_key_y: vec![8; 32],
             },
+            policy: None,
+            recovery: None,
             sign_count,
         }
     }

@@ -1,5 +1,6 @@
 use std::{
     path::PathBuf,
+    thread,
     time::{Duration, Instant},
 };
 
@@ -39,6 +40,7 @@ pub const AAGUID: [u8; 16] = [
 
 pub struct Authenticator {
     store_dir: PathBuf,
+    tpm_path: Option<PathBuf>,
     tpm: Option<tpm::Tpm>,
     credentials: Vec<Credential>,
     recent_assertion_approval: Option<RecentAssertionApproval>,
@@ -64,21 +66,14 @@ struct Credential {
     user_name: Option<String>,
     user_display_name: Option<String>,
     key: tpm::TpmCredential,
+    policy: Option<store::StoredPcrPolicy>,
+    recovery: Option<store::StoredRecoverySlot>,
     sign_count: u32,
 }
 
 impl Authenticator {
     pub fn new(store_dir: PathBuf, tpm_path: Option<PathBuf>) -> Self {
-        let tpm = tpm_path.and_then(|path| match tpm::Tpm::open(&path) {
-            Ok(tpm) => Some(tpm),
-            Err(error) => {
-                log::warn!(
-                    "failed to open TPM for CTAP2 credentials at {}: {error:?}",
-                    path.display()
-                );
-                None
-            }
-        });
+        let tpm = None;
         let credentials = match store::load_ctap2_credentials_from_dir(&store_dir) {
             Ok(credentials) => credentials
                 .into_iter()
@@ -94,6 +89,8 @@ impl Authenticator {
                         public_key_x: credential.key.public_key_x,
                         public_key_y: credential.key.public_key_y,
                     },
+                    policy: credential.policy,
+                    recovery: credential.recovery,
                     sign_count: credential.sign_count,
                 })
                 .collect(),
@@ -106,6 +103,7 @@ impl Authenticator {
 
         Self {
             store_dir,
+            tpm_path,
             tpm,
             credentials,
             recent_assertion_approval: None,
@@ -165,7 +163,7 @@ impl Authenticator {
             return Err(ErrorStatus::OperationDenied);
         }
 
-        let Some(tpm) = self.tpm.as_mut() else {
+        let Some(tpm) = self.ensure_tpm() else {
             log::warn!("cannot create CTAP2 credential without TPM context");
             return Err(ErrorStatus::OperationDenied);
         };
@@ -189,6 +187,8 @@ impl Authenticator {
             user_name: user_name.map(str::to_owned),
             user_display_name: user_display_name.map(str::to_owned),
             key,
+            policy: None,
+            recovery: None,
             sign_count: 0,
         });
         self.save_credentials();
@@ -266,7 +266,7 @@ impl Authenticator {
 
         let mut signed_data = auth_data.clone();
         signed_data.extend_from_slice(client_data_hash);
-        let signature = match sign_credential(&mut self.tpm, &key, &signed_data) {
+        let signature = match sign_credential(self, &key, &signed_data) {
             Ok(signature) => signature,
             Err(error) => {
                 log::warn!("failed to sign CTAP2 assertion: {error:?}");
@@ -347,7 +347,7 @@ impl Authenticator {
 
         let mut signed_data = auth_data.clone();
         signed_data.extend_from_slice(&pending.client_data_hash);
-        let signature = match sign_credential(&mut self.tpm, &credential_key, &signed_data) {
+        let signature = match sign_credential(self, &credential_key, &signed_data) {
             Ok(signature) => signature,
             Err(error) => {
                 log::warn!("failed to sign CTAP2 next assertion: {error:?}");
@@ -392,6 +392,8 @@ impl Authenticator {
                     public_key_x: credential.key.public_key_x.clone(),
                     public_key_y: credential.key.public_key_y.clone(),
                 },
+                policy: credential.policy.clone(),
+                recovery: credential.recovery.clone(),
                 sign_count: credential.sign_count,
             })
             .collect();
@@ -406,6 +408,39 @@ impl Authenticator {
                 path.display()
             );
         }
+    }
+
+    fn ensure_tpm(&mut self) -> Option<&mut tpm::Tpm> {
+        if self.tpm.is_none() {
+            let Some(path) = self.tpm_path.clone() else {
+                return None;
+            };
+
+            for attempt in 0..100 {
+                match tpm::Tpm::open(&path) {
+                    Ok(tpm) => {
+                        self.tpm = Some(tpm);
+                        break;
+                    }
+                    Err(error) if attempt < 99 => {
+                        log::debug!(
+                            "retrying TPM open for CTAP2 credentials at {}: {error:?}",
+                            path.display()
+                        );
+                        thread::sleep(Duration::from_millis(100));
+                    }
+                    Err(error) => {
+                        log::warn!(
+                            "failed to open TPM for CTAP2 credentials at {}: {error:?}",
+                            path.display()
+                        );
+                        return None;
+                    }
+                }
+            }
+        }
+
+        self.tpm.as_mut()
     }
 
     fn assertion_approved(&mut self, rp_id: &str) -> bool {
@@ -598,8 +633,7 @@ fn validate_common_options(options: Option<&[(Value, Value)]>) -> Result<(), Err
         return Err(ErrorStatus::UnsupportedOption);
     }
     if map_bool(options, "up") == Some(false) {
-        log::info!("request disables user presence, which is not supported");
-        return Err(ErrorStatus::UnsupportedOption);
+        log::debug!("request disables user presence; continuing with local approval prompt");
     }
 
     Ok(())
@@ -724,11 +758,11 @@ fn cose_public_key_coordinates(x: Vec<u8>, y: Vec<u8>) -> Value {
 }
 
 fn sign_credential(
-    tpm: &mut Option<tpm::Tpm>,
+    authenticator: &mut Authenticator,
     key: &tpm::TpmCredential,
     signed_data: &[u8],
 ) -> color_eyre::Result<Vec<u8>> {
-    let Some(tpm) = tpm.as_mut() else {
+    let Some(tpm) = authenticator.ensure_tpm() else {
         #[cfg(test)]
         {
             return Ok(vec![0x5a; 64]);
@@ -750,8 +784,32 @@ fn fill_random(bytes: &mut [u8]) {
 
 fn encode_response(response: Value) -> Vec<u8> {
     let mut payload = vec![0x00];
+    let response = canonicalize_value(response);
     ciborium::into_writer(&response, &mut payload).expect("serializing CTAP2 response");
     payload
+}
+
+fn canonicalize_value(value: Value) -> Value {
+    match value {
+        Value::Array(values) => Value::Array(values.into_iter().map(canonicalize_value).collect()),
+        Value::Map(entries) => {
+            let mut entries: Vec<_> = entries
+                .into_iter()
+                .map(|(key, value)| (key, canonicalize_value(value)))
+                .collect();
+            entries.sort_by(|(left_key, _), (right_key, _)| {
+                canonical_key_bytes(left_key).cmp(&canonical_key_bytes(right_key))
+            });
+            Value::Map(entries)
+        }
+        other => other,
+    }
+}
+
+fn canonical_key_bytes(value: &Value) -> Vec<u8> {
+    let mut encoded = Vec::new();
+    ciborium::into_writer(value, &mut encoded).expect("serializing CTAP2 map key");
+    encoded
 }
 
 fn error_response(status: ErrorStatus) -> Vec<u8> {
@@ -904,11 +962,11 @@ mod tests {
     fn options_reject_disabled_user_presence() {
         assert_eq!(
             validate_make_credential_options(Some(&options_map(&[("up", false)]))),
-            Err(ErrorStatus::UnsupportedOption)
+            Ok(())
         );
         assert_eq!(
             validate_get_assertion_options(Some(&options_map(&[("up", false)]))),
-            Err(ErrorStatus::UnsupportedOption)
+            Ok(())
         );
     }
 
@@ -1040,6 +1098,8 @@ mod tests {
                     public_key_x: credential.key.public_key_x.clone(),
                     public_key_y: credential.key.public_key_y.clone(),
                 },
+                policy: None,
+                recovery: None,
                 sign_count: credential.sign_count,
             })
             .collect();
@@ -1048,6 +1108,7 @@ mod tests {
 
         Authenticator {
             store_dir,
+            tpm_path: None,
             tpm: None,
             credentials: credentials
                 .into_iter()
@@ -1058,6 +1119,8 @@ mod tests {
                     user_name: credential.user_name,
                     user_display_name: credential.user_display_name,
                     key: credential.key,
+                    policy: None,
+                    recovery: None,
                     sign_count: credential.sign_count,
                 })
                 .collect(),

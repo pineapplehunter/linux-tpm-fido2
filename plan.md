@@ -1,5 +1,16 @@
 # Implementation Plan
 
+## Generel things to keep in mind.
+- Commit the changes to git after a task
+- Do these tests
+    - cargo check
+    - cargo test
+    - nixos test
+- Fixup cargo clippy after a POC implementation
+- When writing bash scripts for nix, generally keep the script in a separate file and use lib.readFile to import it.
+- Create a todolist to accomplish each task.
+- Update README and AGENTS.md when a new feature gets implemented or the implementation changed from the original docs.
+
 ## Completed
 
 - [x] Rust crate with `hid`, `ctaphid`, `ctap2`, `tpm`, and `store` modules.
@@ -18,21 +29,19 @@
 - [x] Assertion sign counters persisted before success is returned.
 - [x] SQLx offline metadata generated for compile-time query checking.
 - [x] Dev shell exports `SQLX_OFFLINE=true`.
+- [x] Holistic NixOS test boots a VM, starts the daemon, provisions a virtual TPM, completes register/assert, and verifies restart against the same SQLite store and TPM state.
 
 ## In Progress
 
-- [ ] Add a holistic NixOS test that boots a VM, starts the daemon, provisions a virtual TPM, and drives the authenticator end-to-end.
+- [ ] Improve CTAP2 request handling for browser edge cases.
 
 ## Next
 
-1. [ ] Run the holistic NixOS test against credential registration and login.
-2. [ ] Verify daemon restart with the same SQLite store and TPM state.
-3. [ ] Improve CTAP2 request handling for browser edge cases.
-4. [ ] Add PCR-bound credential creation and assertion, starting with secure boot state.
-5. [ ] Add recovery slots using passphrase-unlocked TPM-bound material.
-6. [ ] Evolve the SQLite schema toward LUKS2-style metadata, tokens, and keyslots.
-7. [ ] Decide the daemon/user-session model before GTK work.
-8. [ ] Add GTK approval and settings UI after transport, TPM, and storage are stable.
+1. [ ] Add PCR-bound credential creation and assertion, starting with secure boot state.
+2. [ ] Add recovery slots using passphrase-unlocked TPM-bound material.
+3. [ ] Evolve the SQLite schema toward LUKS2-style metadata, tokens, and keyslots.
+4. [ ] Decide the daemon/user-session model before GTK work.
+5. [ ] Add GTK approval and settings UI after transport, TPM, and storage are stable.
 
 ## Architecture Direction
 
