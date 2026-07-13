@@ -1,8 +1,18 @@
-use std::io::{self, Write};
+use std::{
+    io::{self, Write},
+    path::Path,
+};
 
-use crate::session;
+use crate::{
+    ipc::{self, ApprovalPrompt, IpcRequest, IpcResponse},
+    session,
+};
 
-pub fn approve(prompt: &str, session: &session::SessionContext) -> bool {
+pub fn approve(prompt: &str, session: &session::SessionContext, store_dir: &Path) -> bool {
+    if let Some(approved) = approve_via_ipc(prompt, session, store_dir) {
+        return approved;
+    }
+
     let mut stdout = io::stdout();
     if write!(
         stdout,
@@ -21,4 +31,88 @@ pub fn approve(prompt: &str, session: &session::SessionContext) -> bool {
     }
 
     matches!(answer.trim(), "y" | "Y" | "yes" | "YES" | "Yes")
+}
+
+fn approve_via_ipc(
+    prompt: &str,
+    session: &session::SessionContext,
+    store_dir: &Path,
+) -> Option<bool> {
+    let socket_path = ipc::control_socket_path_in_dir(store_dir);
+    if !socket_path.exists() {
+        return None;
+    }
+
+    let request = IpcRequest::PromptApproval(ApprovalPrompt {
+        session: session.clone(),
+        prompt: prompt.to_owned(),
+    });
+
+    match ipc::send_request(&socket_path, &request) {
+        Ok(IpcResponse::ApprovalDecision(decision)) => {
+            log::info!(
+                "approval handled by GTK IPC at {} with decision={decision}",
+                socket_path.display()
+            );
+            Some(decision)
+        }
+        Ok(other) => {
+            log::warn!(
+                "GTK IPC approval returned unexpected response at {}: {other:?}",
+                socket_path.display()
+            );
+            None
+        }
+        Err(error) => {
+            log::warn!(
+                "GTK IPC approval unavailable at {}: {error:?}",
+                socket_path.display()
+            );
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::approve;
+    use crate::{
+        gtk_ui::UiSettings,
+        ipc,
+        session::{DaemonSessionModel, SessionContext},
+    };
+    use std::{
+        sync::{Arc, Mutex},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    #[test]
+    fn approve_uses_ipc_when_socket_exists() {
+        let dir = std::env::temp_dir().join(format!(
+            "linux-tpm-fido2-approval-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time after Unix epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+
+        let settings = Arc::new(Mutex::new(UiSettings::default()));
+        let _socket_path =
+            ipc::start_control_socket_server(&dir, settings).expect("start ipc server");
+
+        let session = SessionContext {
+            model: DaemonSessionModel::ActiveGraphicalSession,
+            user: Some("alice".to_owned()),
+            uid: Some(1000),
+            session_id: Some("c2".to_owned()),
+            seat: Some("seat0".to_owned()),
+            display: Some(":0".to_owned()),
+            wayland_display: None,
+            dbus_session_bus_address: None,
+        };
+
+        assert!(approve("Approve passkey request", &session, &dir));
+    }
 }

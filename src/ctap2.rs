@@ -165,6 +165,7 @@ impl Authenticator {
                 user_display_name.or(user_name).unwrap_or("unknown user")
             ),
             &self.session,
+            &self.store_dir,
         ) {
             return Err(ErrorStatus::OperationDenied);
         }
@@ -513,6 +514,7 @@ impl Authenticator {
         if !approval::approve(
             &format!("Authenticate with passkey for {rp_id}"),
             &self.session,
+            &self.store_dir,
         ) {
             self.recent_assertion_approval = None;
             return false;
