@@ -148,6 +148,7 @@ impl Authenticator {
         }
 
         let rp_id = map_text(rp, "id").ok_or(ErrorStatus::MissingParameter)?;
+        let rp_name = map_text(rp, "name");
         let user_handle = map_bytes(user, "id").ok_or(ErrorStatus::MissingParameter)?;
         let user_name = map_text(user, "name");
         let user_display_name = map_text(user, "displayName");
@@ -161,7 +162,7 @@ impl Authenticator {
         if !approval::approve(
             &format!(
                 "Register a new passkey for {} as {}",
-                rp_id,
+                display_rp_label(rp_name, rp_id),
                 user_display_name.or(user_name).unwrap_or("unknown user")
             ),
             &self.session,
@@ -784,6 +785,13 @@ fn make_auth_data(
     auth_data
 }
 
+fn display_rp_label(rp_name: Option<&str>, rp_id: &str) -> String {
+    match rp_name {
+        Some(name) if name != rp_id => format!("{name} ({rp_id})"),
+        _ => rp_id.to_owned(),
+    }
+}
+
 fn encode_assertion_response(
     credential_id: Vec<u8>,
     auth_data: Vec<u8>,
@@ -1225,6 +1233,19 @@ mod tests {
             ]),
         );
         assert_eq!(authenticator.handle_cbor(&get_assertion)[0], 0x12);
+    }
+
+    #[test]
+    fn display_rp_label_prefers_human_readable_name() {
+        assert_eq!(
+            display_rp_label(Some("Weird Site"), "example.com"),
+            "Weird Site (example.com)"
+        );
+        assert_eq!(
+            display_rp_label(Some("example.com"), "example.com"),
+            "example.com"
+        );
+        assert_eq!(display_rp_label(None, "example.com"), "example.com");
     }
 
     fn authenticator_with_credential(rp_id: &str, credential_id: Vec<u8>) -> Authenticator {

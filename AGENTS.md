@@ -5,6 +5,7 @@
 - This repo is starting a Linux TPM-backed FIDO2/WebAuthn passkey daemon; `README.md` is the current product sketch.
 - A Rust crate now exists. The current implementation is an early skeleton for UHID, CTAPHID, minimal CTAP2 `getInfo`, TPM placeholders, and project-local dev storage.
 - TPM signing, credential registration/assertion, persistent credential storage, and recovery-slot generation are implemented; GUI is not fully implemented yet.
+- Never overwrite an existing migration SQL file. Only add new migration files.
 
 ## Project Direction
 
