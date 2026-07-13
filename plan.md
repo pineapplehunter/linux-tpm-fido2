@@ -6,10 +6,14 @@
     - cargo check
     - cargo test
     - nixos test
+    - nix fmt
 - Fixup cargo clippy after a POC implementation
 - When writing bash scripts for nix, generally keep the script in a separate file and use lib.readFile to import it.
 - Create a todolist to accomplish each task.
 - Update README and AGENTS.md when a new feature gets implemented or the implementation changed from the original docs.
+- Use bullet points on tha plan.md to reduce git diff.
+- The user may add tasks in the list.
+
 
 ## Completed
 
@@ -26,6 +30,7 @@
 - [x] Startup logs the SQLite credential database path.
 - [x] TPM probing for RNG and transient P-256 ECDSA signing.
 - [x] TPM-backed P-256 credential creation and assertion signing.
+- [x] Secure-boot PCR-bound credential creation and assertion.
 - [x] Assertion sign counters persisted before success is returned.
 - [x] SQLx offline metadata generated for compile-time query checking.
 - [x] Dev shell exports `SQLX_OFFLINE=true`.
@@ -37,11 +42,11 @@
 
 ## Next
 
-1. [ ] Add PCR-bound credential creation and assertion, starting with secure boot state.
-2. [ ] Add recovery slots using passphrase-unlocked TPM-bound material.
-3. [ ] Evolve the SQLite schema toward LUKS2-style metadata, tokens, and keyslots.
-4. [ ] Decide the daemon/user-session model before GTK work.
-5. [ ] Add GTK approval and settings UI after transport, TPM, and storage are stable.
+- [ ] Add setup for a formatter using treefmt-nix. Search for docs and setup `nixfmt` for nix, `rustfmt` for rust and `taplo` for toml.
+- [ ] Add recovery slots using passphrase-unlocked TPM-bound material.
+- [ ] Evolve the SQLite schema toward LUKS2-style metadata, tokens, and keyslots.
+- [ ] Decide the daemon/user-session model before GTK work.
+- [ ] Add GTK approval and settings UI after transport, TPM, and storage are stable.
 
 ## Architecture Direction
 

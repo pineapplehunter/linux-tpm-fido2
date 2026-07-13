@@ -45,4 +45,4 @@ The daemon currently accepts `--uhid-path`, `--tpm-path`, `--store-dir`, and `--
 
 The daemon can create a UHID-backed FIDO HID device, handle CTAPHID `INIT`, `PING`, `CBOR`, `WINK`, and `CANCEL`, and implement CTAP2 `authenticatorGetInfo`, `authenticatorMakeCredential`, and `authenticatorGetAssertion`.
 
-CTAP2 credentials are TPM-backed P-256 ECDSA keys persisted as TPM private/public blobs in a development SQLite store managed by `sqlx` migrations. TPM PCR binding, recovery, production metadata durability, and GUI are not implemented yet.
+CTAP2 credentials are TPM-backed P-256 ECDSA keys persisted as TPM private/public blobs in a development SQLite store managed by `sqlx` migrations. Secure-boot PCR binding is now wired for credential creation and assertion; recovery, production metadata durability, and GUI are not implemented yet.

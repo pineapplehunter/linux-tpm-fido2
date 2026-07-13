@@ -167,7 +167,16 @@ impl Authenticator {
             log::warn!("cannot create CTAP2 credential without TPM context");
             return Err(ErrorStatus::OperationDenied);
         };
-        let key = match tpm.create_credential_key() {
+        let policy = match tpm.create_secure_boot_policy() {
+            Ok(policy) => policy,
+            Err(error) => {
+                log::warn!(
+                    "failed to create secure-boot PCR policy for CTAP2 credential: {error:?}"
+                );
+                return Err(ErrorStatus::OperationDenied);
+            }
+        };
+        let key = match tpm.create_credential_key_with_policy(Some(&policy)) {
             Ok(credential) => credential,
             Err(error) => {
                 log::warn!("failed to create TPM-backed CTAP2 credential key: {error:?}");
@@ -187,7 +196,10 @@ impl Authenticator {
             user_name: user_name.map(str::to_owned),
             user_display_name: user_display_name.map(str::to_owned),
             key,
-            policy: None,
+            policy: Some(store::StoredPcrPolicy {
+                selection: policy.selection,
+                digest: policy.digest,
+            }),
             recovery: None,
             sign_count: 0,
         });
@@ -235,7 +247,7 @@ impl Authenticator {
             })
         };
 
-        let (auth_data, user, credential_id, key, rp_log, sign_count) = {
+        let (auth_data, user, credential_id, key, policy, rp_log, sign_count) = {
             let credential = &self.credentials[credential_index];
             let sign_count = credential.sign_count.saturating_add(1);
             let auth_data = make_auth_data(&credential.rp_id, 0x01, sign_count, None);
@@ -259,6 +271,7 @@ impl Authenticator {
                 user,
                 credential.id.clone(),
                 credential.key.clone(),
+                credential.policy.clone(),
                 credential.rp_id.clone(),
                 sign_count,
             )
@@ -266,7 +279,7 @@ impl Authenticator {
 
         let mut signed_data = auth_data.clone();
         signed_data.extend_from_slice(client_data_hash);
-        let signature = match sign_credential(self, &key, &signed_data) {
+        let signature = match sign_credential(self, &key, policy.as_ref(), &signed_data) {
             Ok(signature) => signature,
             Err(error) => {
                 log::warn!("failed to sign CTAP2 assertion: {error:?}");
@@ -331,6 +344,7 @@ impl Authenticator {
         let credential_id = credential.id.clone();
         let rp_log = credential.rp_id.clone();
         let credential_key = credential.key.clone();
+        let credential_policy = credential.policy.clone();
         let user_handle = credential.user_handle.clone();
         let user_name = credential.user_name.clone();
         let user_display_name = credential.user_display_name.clone();
@@ -347,7 +361,12 @@ impl Authenticator {
 
         let mut signed_data = auth_data.clone();
         signed_data.extend_from_slice(&pending.client_data_hash);
-        let signature = match sign_credential(self, &credential_key, &signed_data) {
+        let signature = match sign_credential(
+            self,
+            &credential_key,
+            credential_policy.as_ref(),
+            &signed_data,
+        ) {
             Ok(signature) => signature,
             Err(error) => {
                 log::warn!("failed to sign CTAP2 next assertion: {error:?}");
@@ -760,6 +779,7 @@ fn cose_public_key_coordinates(x: Vec<u8>, y: Vec<u8>) -> Value {
 fn sign_credential(
     authenticator: &mut Authenticator,
     key: &tpm::TpmCredential,
+    policy: Option<&store::StoredPcrPolicy>,
     signed_data: &[u8],
 ) -> color_eyre::Result<Vec<u8>> {
     let Some(tpm) = authenticator.ensure_tpm() else {
@@ -775,7 +795,11 @@ fn sign_credential(
         }
     };
     let digest = Sha256::digest(signed_data);
-    tpm.sign_digest(key, &digest)
+    let policy_binding = policy.map(|policy| tpm::PcrPolicyBinding {
+        selection: policy.selection.clone(),
+        digest: policy.digest.clone(),
+    });
+    tpm.sign_digest_with_policy(key, policy_binding.as_ref(), &digest)
 }
 
 fn fill_random(bytes: &mut [u8]) {
