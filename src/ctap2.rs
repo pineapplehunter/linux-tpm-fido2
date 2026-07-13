@@ -296,12 +296,12 @@ impl Authenticator {
             })
             .collect();
 
-        let path = store::ctap2_credentials_path_in_dir(&self.store_dir);
+        let path = store::credentials_database_path_in_dir(&self.store_dir);
         if let Err(error) = store::save_ctap2_credentials_to_dir(&self.store_dir, &credentials) {
             log::warn!("failed to save CTAP2 credential store: {error:?}");
         } else {
             log::info!(
-                "saved {} TPM-backed CTAP2 credentials to {}",
+                "saved {} TPM-backed CTAP2 credentials to SQLite store {}",
                 credentials.len(),
                 path.display()
             );

@@ -26,38 +26,50 @@ The store directory can be overridden at runtime:
 linux-tpm-fido2 --store-dir /path/to/store
 ```
 
-Startup logs the resolved credential file path.
+Startup logs the resolved SQLite database path.
 
 ### Files
 
-The current implementation uses one JSON file:
+The current implementation uses one SQLite database:
 
 ```text
-.linux-tpm-fido2-store/ctap2-credentials.json
+.linux-tpm-fido2-store/credentials.sqlite
 ```
 
-All binary values are base64-encoded JSON strings.
+The schema is managed with `sqlx` migrations in `migrations/`.
 
 The store directory is git-ignored.
 
-### CTAP2 TPM Credentials
+### Schema
 
-Each credential record contains WebAuthn metadata plus TPM key blobs:
+The initial migration creates two tables.
 
-```json
-{
-  "id": "base64 credential ID",
-  "rp_id": "example.com",
-  "user_handle": "base64 user handle",
-  "user_name": "optional username",
-  "user_display_name": "optional display name",
-  "tpm_private": "base64 TPM2B_PRIVATE blob",
-  "tpm_public": "base64 marshalled TPMT_PUBLIC blob",
-  "public_key_x": "base64 P-256 x coordinate",
-  "public_key_y": "base64 P-256 y coordinate",
-  "sign_count": 0
-}
+```sql
+CREATE TABLE credentials (
+    credential_id BLOB PRIMARY KEY NOT NULL,
+    rp_id TEXT NOT NULL,
+    user_handle BLOB NOT NULL,
+    user_name TEXT,
+    user_display_name TEXT,
+    sign_count INTEGER NOT NULL CHECK (sign_count >= 0),
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE tpm_keys (
+    credential_id BLOB PRIMARY KEY NOT NULL REFERENCES credentials(credential_id) ON DELETE CASCADE,
+    tpm_private BLOB NOT NULL,
+    tpm_public BLOB NOT NULL,
+    public_key_x BLOB NOT NULL,
+    public_key_y BLOB NOT NULL
+);
 ```
+
+`credentials` stores WebAuthn-facing metadata and the signature counter.
+
+`tpm_keys` stores the TPM private/public blobs plus the P-256 public coordinates used for the WebAuthn COSE key.
+
+### CTAP2 TPM Credentials
 
 Behavior:
 
@@ -66,7 +78,7 @@ Behavior:
 - `tpm_private` and `tpm_public` are saved so the key can be loaded later.
 - `public_key_x` and `public_key_y` are saved for WebAuthn COSE public key material.
 - During assertion, the daemon creates a transient storage parent, loads the credential key blobs, signs the assertion digest in the TPM, then flushes transient TPM handles.
-- `sign_count` is incremented after assertion signing and persisted back to JSON.
+- `sign_count` is incremented after assertion signing and persisted back to SQLite.
 
 Current TPM parent strategy:
 
@@ -85,29 +97,26 @@ Security status:
 - TPM private blobs are not raw private keys, but this is still development storage.
 - There is no PCR policy yet.
 - There is no recovery design yet.
-- JSON writes are not atomic yet.
 - Metadata is not authenticated as a complete structure yet.
 
 ## Current Limitations
 
-- The JSON store is intentionally simple and development-oriented.
-- Signature-counter updates are simple rewrites and are not crash-safe.
+- SQLite gives atomic transactions, but the credential schema is still development-oriented.
+- Assertion currently increments the in-memory signature counter before signing and then saves; persistence failure semantics still need tightening.
 - TPM-backed credentials are not PCR-bound yet.
 - TPM-backed credentials do not yet have passphrase recovery slots.
 - There is no per-user namespace design yet.
-- There is no integrity protection over the metadata file as a whole.
-- Old development stores containing software records should be deleted or recreated.
+- There is no integrity protection over credential metadata as a whole.
 
 ## Future Improvements
 
 ### Production Metadata Format
 
-Credential storage should evolve toward a LUKS2-inspired metadata format:
+Credential storage should evolve toward a LUKS2-inspired SQLite schema:
 
-- Structured JSON metadata with a clear schema version.
-- Atomic writes with temporary files and rename.
-- Metadata checksums or authenticated digests.
-- Duplicated metadata areas or recoverable metadata updates.
+- Schema migrations for all persistent changes.
+- Atomic updates for registration, counter changes, policy changes, and recovery-slot changes.
+- Metadata checksums or authenticated digests where useful.
 - Clear separation between credential metadata, encrypted secrets, keyslots, tokens, and policy descriptors.
 
 ### TPM-Backed Credentials

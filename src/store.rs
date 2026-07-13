@@ -1,17 +1,18 @@
 use std::{
     fs,
+    future::Future,
     path::{Path, PathBuf},
+    str::FromStr,
 };
 
-use base64::{Engine, engine::general_purpose::STANDARD};
-use color_eyre::{
-    Result,
-    eyre::{WrapErr, eyre},
+use color_eyre::{Result, eyre::WrapErr};
+use sqlx::{
+    Row, SqlitePool,
+    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
 };
-use serde::{Deserialize, Serialize};
 
 pub const DEV_STORE_DIR: &str = ".linux-tpm-fido2-store";
-const CTAP2_CREDENTIALS_FILE: &str = "ctap2-credentials.json";
+const CREDENTIALS_DATABASE_FILE: &str = "credentials.sqlite";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredCtap2Credential {
@@ -32,32 +33,12 @@ pub struct StoredTpmKey {
     pub public_key_y: Vec<u8>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct Ctap2CredentialFile {
-    version: u32,
-    credentials: Vec<Ctap2CredentialRecord>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct Ctap2CredentialRecord {
-    id: String,
-    rp_id: String,
-    user_handle: String,
-    user_name: Option<String>,
-    user_display_name: Option<String>,
-    tpm_private: String,
-    tpm_public: String,
-    public_key_x: String,
-    public_key_y: String,
-    sign_count: u32,
-}
-
 pub fn dev_store_dir() -> PathBuf {
     PathBuf::from(DEV_STORE_DIR)
 }
 
-pub fn ctap2_credentials_path() -> PathBuf {
-    ctap2_credentials_path_in_dir(dev_store_dir())
+pub fn credentials_database_path() -> PathBuf {
+    credentials_database_path_in_dir(dev_store_dir())
 }
 
 pub fn load_ctap2_credentials() -> Result<Vec<StoredCtap2Credential>> {
@@ -67,48 +48,7 @@ pub fn load_ctap2_credentials() -> Result<Vec<StoredCtap2Credential>> {
 pub fn load_ctap2_credentials_from_dir(
     dir: impl AsRef<Path>,
 ) -> Result<Vec<StoredCtap2Credential>> {
-    let path = ctap2_credentials_path_in_dir(dir);
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-
-    let data = fs::read_to_string(&path).wrap_err_with(|| format!("reading {}", path.display()))?;
-    let file: Ctap2CredentialFile = serde_json::from_str(&data).wrap_err_with(|| {
-        format!(
-            "parsing {} as a TPM-backed CTAP2 credential store; \
-             if this is an old development store with removed software credentials, \
-             delete or recreate the store directory",
-            path.display()
-        )
-    })?;
-
-    if file.version != 1 {
-        return Err(eyre!(
-            "unsupported CTAP2 credential store version {} in {}; expected version 1",
-            file.version,
-            path.display()
-        ));
-    }
-
-    file.credentials
-        .into_iter()
-        .map(|record| {
-            Ok(StoredCtap2Credential {
-                id: decode_field(&record.id, "id")?,
-                rp_id: record.rp_id,
-                user_handle: decode_field(&record.user_handle, "user_handle")?,
-                user_name: record.user_name,
-                user_display_name: record.user_display_name,
-                key: StoredTpmKey {
-                    private: decode_field(&record.tpm_private, "tpm_private")?,
-                    public: decode_field(&record.tpm_public, "tpm_public")?,
-                    public_key_x: decode_field(&record.public_key_x, "public_key_x")?,
-                    public_key_y: decode_field(&record.public_key_y, "public_key_y")?,
-                },
-                sign_count: record.sign_count,
-            })
-        })
-        .collect()
+    block_on_store(load_ctap2_credentials_async(dir.as_ref()))
 }
 
 pub fn save_ctap2_credentials(credentials: &[StoredCtap2Credential]) -> Result<()> {
@@ -119,42 +59,138 @@ pub fn save_ctap2_credentials_to_dir(
     dir: impl AsRef<Path>,
     credentials: &[StoredCtap2Credential],
 ) -> Result<()> {
-    let dir = dir.as_ref();
-    fs::create_dir_all(&dir).wrap_err_with(|| format!("creating {}", dir.display()))?;
+    block_on_store(save_ctap2_credentials_async(dir.as_ref(), credentials))
+}
 
-    let file = Ctap2CredentialFile {
-        version: 1,
-        credentials: credentials
-            .iter()
-            .map(|credential| Ctap2CredentialRecord {
-                id: STANDARD.encode(&credential.id),
-                rp_id: credential.rp_id.clone(),
-                user_handle: STANDARD.encode(&credential.user_handle),
-                user_name: credential.user_name.clone(),
-                user_display_name: credential.user_display_name.clone(),
-                tpm_private: STANDARD.encode(&credential.key.private),
-                tpm_public: STANDARD.encode(&credential.key.public),
-                public_key_x: STANDARD.encode(&credential.key.public_key_x),
-                public_key_y: STANDARD.encode(&credential.key.public_key_y),
-                sign_count: credential.sign_count,
+pub fn credentials_database_path_in_dir(dir: impl AsRef<Path>) -> PathBuf {
+    dir.as_ref().join(CREDENTIALS_DATABASE_FILE)
+}
+
+async fn load_ctap2_credentials_async(dir: &Path) -> Result<Vec<StoredCtap2Credential>> {
+    let database_path = credentials_database_path_in_dir(dir);
+    if !database_path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let pool = open_database(dir).await?;
+    let rows = sqlx::query(
+        "SELECT c.credential_id, c.rp_id, c.user_handle, c.user_name, c.user_display_name, \
+                c.sign_count, k.tpm_private, k.tpm_public, k.public_key_x, k.public_key_y \
+         FROM credentials c \
+         JOIN tpm_keys k ON k.credential_id = c.credential_id \
+         ORDER BY c.rp_id, c.credential_id",
+    )
+    .fetch_all(&pool)
+    .await
+    .wrap_err_with(|| format!("loading credentials from {}", database_path.display()))?;
+
+    rows.into_iter()
+        .map(|row| {
+            let sign_count: i64 = row.try_get("sign_count")?;
+            Ok(StoredCtap2Credential {
+                id: row.try_get("credential_id")?,
+                rp_id: row.try_get("rp_id")?,
+                user_handle: row.try_get("user_handle")?,
+                user_name: row.try_get("user_name")?,
+                user_display_name: row.try_get("user_display_name")?,
+                key: StoredTpmKey {
+                    private: row.try_get("tpm_private")?,
+                    public: row.try_get("tpm_public")?,
+                    public_key_x: row.try_get("public_key_x")?,
+                    public_key_y: row.try_get("public_key_y")?,
+                },
+                sign_count: u32::try_from(sign_count)
+                    .wrap_err_with(|| format!("invalid sign_count {sign_count}"))?,
             })
-            .collect(),
-    };
-
-    let path = ctap2_credentials_path_in_dir(dir);
-    let data =
-        serde_json::to_string_pretty(&file).wrap_err("serializing CTAP2 credential store")?;
-    fs::write(&path, data).wrap_err_with(|| format!("writing {}", path.display()))
+        })
+        .collect()
 }
 
-pub fn ctap2_credentials_path_in_dir(dir: impl AsRef<Path>) -> PathBuf {
-    dir.as_ref().join(CTAP2_CREDENTIALS_FILE)
+async fn save_ctap2_credentials_async(
+    dir: &Path,
+    credentials: &[StoredCtap2Credential],
+) -> Result<()> {
+    let pool = open_database(dir).await?;
+    let mut tx = pool.begin().await.wrap_err("beginning store transaction")?;
+
+    sqlx::query("DELETE FROM tpm_keys")
+        .execute(&mut *tx)
+        .await
+        .wrap_err("clearing TPM key rows")?;
+    sqlx::query("DELETE FROM credentials")
+        .execute(&mut *tx)
+        .await
+        .wrap_err("clearing credential rows")?;
+
+    for credential in credentials {
+        sqlx::query(
+            "INSERT INTO credentials \
+             (credential_id, rp_id, user_handle, user_name, user_display_name, sign_count) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )
+        .bind(&credential.id)
+        .bind(&credential.rp_id)
+        .bind(&credential.user_handle)
+        .bind(&credential.user_name)
+        .bind(&credential.user_display_name)
+        .bind(i64::from(credential.sign_count))
+        .execute(&mut *tx)
+        .await
+        .wrap_err_with(|| format!("saving credential for rp_id={}", credential.rp_id))?;
+
+        sqlx::query(
+            "INSERT INTO tpm_keys \
+             (credential_id, tpm_private, tpm_public, public_key_x, public_key_y) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+        )
+        .bind(&credential.id)
+        .bind(&credential.key.private)
+        .bind(&credential.key.public)
+        .bind(&credential.key.public_key_x)
+        .bind(&credential.key.public_key_y)
+        .execute(&mut *tx)
+        .await
+        .wrap_err_with(|| format!("saving TPM key for rp_id={}", credential.rp_id))?;
+    }
+
+    tx.commit()
+        .await
+        .wrap_err("committing credential store transaction")
 }
 
-fn decode_field(value: &str, name: &str) -> Result<Vec<u8>> {
-    STANDARD
-        .decode(value)
-        .wrap_err_with(|| format!("decoding base64 field {name}"))
+async fn open_database(dir: &Path) -> Result<SqlitePool> {
+    fs::create_dir_all(dir).wrap_err_with(|| format!("creating {}", dir.display()))?;
+    let database_path = credentials_database_path_in_dir(dir);
+    let database_url = format!("sqlite://{}", database_path.display());
+    let options = SqliteConnectOptions::from_str(&database_url)
+        .wrap_err_with(|| format!("building SQLite URL for {}", database_path.display()))?
+        .create_if_missing(true)
+        .foreign_keys(true);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .wrap_err_with(|| {
+            format!(
+                "opening SQLite credential store {}",
+                database_path.display()
+            )
+        })?;
+
+    sqlx::migrate!("./migrations")
+        .run(&pool)
+        .await
+        .wrap_err_with(|| format!("running migrations for {}", database_path.display()))?;
+
+    Ok(pool)
+}
+
+fn block_on_store<T>(future: impl Future<Output = Result<T>>) -> Result<T> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .wrap_err("creating SQLite store runtime")?
+        .block_on(future)
 }
 
 #[cfg(test)]
@@ -175,7 +211,7 @@ mod tests {
     }
 
     #[test]
-    fn credentials_round_trip_as_json() {
+    fn credentials_round_trip_through_sqlite() {
         let dir = test_store_dir("ctap2-round-trip");
         let credentials = vec![StoredCtap2Credential {
             id: vec![1, 2, 3, 4],
@@ -196,57 +232,50 @@ mod tests {
         let loaded = load_ctap2_credentials_from_dir(&dir).expect("load CTAP2 credentials");
 
         assert_eq!(loaded, credentials);
+        assert!(credentials_database_path_in_dir(&dir).exists());
         fs::remove_dir_all(&dir).expect("remove test store");
     }
 
     #[test]
-    fn unsupported_store_version_is_rejected() {
-        let dir = test_store_dir("unsupported-version");
-        fs::create_dir_all(&dir).expect("create test store");
-        fs::write(
-            ctap2_credentials_path_in_dir(&dir),
-            r#"{"version":2,"credentials":[]}"#,
-        )
-        .expect("write test store");
+    fn saving_replaces_removed_credentials() {
+        let dir = test_store_dir("replace-removed");
+        let first = StoredCtap2Credential {
+            id: vec![1],
+            rp_id: "first.example".to_owned(),
+            user_handle: vec![1],
+            user_name: None,
+            user_display_name: None,
+            key: StoredTpmKey {
+                private: vec![1],
+                public: vec![2],
+                public_key_x: vec![3; 32],
+                public_key_y: vec![4; 32],
+            },
+            sign_count: 1,
+        };
+        let second = StoredCtap2Credential {
+            id: vec![2],
+            rp_id: "second.example".to_owned(),
+            user_handle: vec![2],
+            user_name: None,
+            user_display_name: None,
+            key: StoredTpmKey {
+                private: vec![5],
+                public: vec![6],
+                public_key_x: vec![7; 32],
+                public_key_y: vec![8; 32],
+            },
+            sign_count: 2,
+        };
 
-        let error = load_ctap2_credentials_from_dir(&dir).expect_err("reject version");
+        save_ctap2_credentials_to_dir(&dir, &[first, second.clone()])
+            .expect("save both credentials");
+        save_ctap2_credentials_to_dir(&dir, std::slice::from_ref(&second))
+            .expect("save remaining credential");
 
-        assert!(
-            error
-                .to_string()
-                .contains("unsupported CTAP2 credential store version 2")
-        );
-        fs::remove_dir_all(&dir).expect("remove test store");
-    }
+        let loaded = load_ctap2_credentials_from_dir(&dir).expect("load credentials");
 
-    #[test]
-    fn old_development_store_parse_error_includes_reset_hint() {
-        let dir = test_store_dir("old-software-record");
-        fs::create_dir_all(&dir).expect("create test store");
-        fs::write(
-            ctap2_credentials_path_in_dir(&dir),
-            r#"{
-              "version": 1,
-              "credentials": [{
-                "id": "AQIDBA==",
-                "rp_id": "example.com",
-                "user_handle": "BQYHCA==",
-                "user_name": "user",
-                "user_display_name": "Test User",
-                "private_key": "legacy-software-key",
-                "public_key_x": "DQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0=",
-                "public_key_y": "Dg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4=",
-                "sign_count": 10
-              }]
-            }"#,
-        )
-        .expect("write old test store");
-
-        let error = load_ctap2_credentials_from_dir(&dir).expect_err("reject old store");
-        let error = format!("{error:?}");
-
-        assert!(error.contains("old development store"));
-        assert!(error.contains("removed software credentials"));
+        assert_eq!(loaded, vec![second]);
         fs::remove_dir_all(&dir).expect("remove test store");
     }
 

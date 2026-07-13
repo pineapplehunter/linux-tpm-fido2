@@ -9,19 +9,20 @@
 - Minimal CTAP2 works through `CTAPHID_CBOR` with `authenticatorGetInfo`, `authenticatorMakeCredential`, and `authenticatorGetAssertion`.
 - CLI yes/no prompts provide early user-presence approval for CTAP2 registration/authentication.
 - Development credentials are persisted in a project-local, git-ignored store.
-- Startup logs the exact credential file paths.
+- Startup logs the exact SQLite credential database path.
 - The dev shell includes `tpm2-tss`, and the Rust crate links `tss-esapi`.
 - Runtime TPM probing can open `/dev/tpmrm0`, read TPM RNG output, create a transient P-256 ECDSA signing key, and sign a test digest.
 - CTAP2 creates TPM-backed P-256 credentials, storing TPM private/public blobs plus public coordinates.
 - CTAP2 assertion signs with TPM-backed credentials.
 - PCR binding, recovery slots, durable production metadata, and GUI are not implemented yet.
 
-## Credential Files
+## Credential Store
 
 - Default store directory: `.linux-tpm-fido2-store`.
 - Override store directory with `--store-dir <path>`.
-- CTAP2 TPM-backed credentials are saved to `ctap2-credentials.json`.
-- The JSON format is still development storage and must not be treated as production metadata.
+- CTAP2 TPM-backed credentials are saved to `credentials.sqlite`.
+- SQLite schema changes are managed with `sqlx` migrations in `migrations/`.
+- The SQLite format is still development storage and must not be treated as production metadata.
 
 ## Near-Term Workflow
 
@@ -34,22 +35,20 @@
 ## Next Milestones
 
 1. Test TPM-backed CTAP2 registration/login against Firefox and Chrome, including daemon restart.
-2. Add clearer store visibility/logging for CTAP2 TPM-backed credential counts.
-3. Improve CTAP2 request handling enough for robust browser behavior: options, exclude list, allow list edge cases, user presence flags, and better CTAP status codes.
-4. Add explicit migration/reset guidance for older development stores that contain removed software credential records.
-5. Add signature-counter persistence semantics that are safe across crashes and failed writes.
-6. Add PCR-bound credential creation and assertion, starting with secure boot state.
-7. Add recovery slots using passphrase-unlocked material that remains TPM-bound but is not PCR-bound.
-8. Move from development JSON files toward a LUKS2-inspired credential metadata format with keyslots, tokens, digests, and atomic writes.
-9. Design the daemon/user-session model before GTK: decide whether this is per-user, system broker plus per-user helper, or active-session routed.
-10. Add GTK approval and settings UI after the transport, TPM, and storage model are stable.
+2. Improve CTAP2 request handling enough for robust browser behavior: options, exclude list, allow list edge cases, user presence flags, and better CTAP status codes.
+3. Add signature-counter persistence semantics that avoid advancing in-memory counters when SQLite persistence fails after signing.
+4. Add PCR-bound credential creation and assertion, starting with secure boot state.
+5. Add recovery slots using passphrase-unlocked material that remains TPM-bound but is not PCR-bound.
+6. Evolve the SQLite schema toward LUKS2-inspired keyslots, tokens, policy descriptors, digests, and recovery metadata.
+7. Design the daemon/user-session model before GTK: decide whether this is per-user, system broker plus per-user helper, or active-session routed.
+8. Add GTK approval and settings UI after the transport, TPM, and storage model are stable.
 
 ## Architecture Direction
 
 - `hid` owns the UHID report descriptor and virtual HID identity.
 - `ctaphid` owns HID packet framing, channel allocation, request assembly, and CTAPHID responses.
 - `ctap2` owns CBOR command parsing, authenticator data, credential lookup, and assertion response shape.
-- `store` owns the development credential file format and will evolve toward production metadata.
+- `store` owns the development SQLite credential schema and migrations and will evolve toward production metadata.
 - `tpm` should own key creation/loading, signing, PCR policy sessions, recovery wrapping, and TPM capability checks.
 
 ## Open Design Questions

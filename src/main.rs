@@ -17,8 +17,8 @@ fn main() -> Result<()> {
     let store_dir = absolute_path(&config.store_dir);
     log::info!("dev store: {}", store_dir.display());
     log::info!(
-        "CTAP2 credential file: {}",
-        store::ctap2_credentials_path_in_dir(&store_dir).display()
+        "credential database: {}",
+        store::credentials_database_path_in_dir(&store_dir).display()
     );
 
     if config.dry_run {
