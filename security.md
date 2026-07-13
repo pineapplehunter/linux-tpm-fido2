@@ -41,7 +41,7 @@ This project is an experimental TPM-backed FIDO2/WebAuthn authenticator daemon w
 
 ## Known Gaps
 
-- The daemon-side GTK IPC auth story is not finished.
+- The daemon-side GTK IPC auth story now checks Unix peer credentials, but broader policy review is still warranted.
 - The session/user binding model is still evolving.
 - The approval path is still partially terminal-driven in the daemon.
 - The store layout is still development-oriented and not hardened for production use.
@@ -49,7 +49,7 @@ This project is an experimental TPM-backed FIDO2/WebAuthn authenticator daemon w
 
 ## Future Work
 
-- Define and enforce IPC authentication for the GTK control socket.
+- Define and enforce IPC authentication for the GTK control socket. The current server now checks peer credentials and rejects unauthorized clients.
 - Decide between per-user daemon, per-session helper, or another user-namespace strategy.
 - Add explicit permission checks around any approval/settings API.
 - Consider stronger anti-rollback or monotonic counter strategies if the threat model requires it.

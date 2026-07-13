@@ -1,6 +1,8 @@
 use std::{
     fs,
     io::{BufRead, BufReader, BufWriter, Write},
+    mem,
+    os::fd::AsRawFd,
     os::unix::net::{UnixListener, UnixStream},
     path::{Path, PathBuf},
     sync::{Arc, Condvar, Mutex},
@@ -94,6 +96,7 @@ pub fn control_socket_path_in_dir(dir: impl AsRef<Path>) -> PathBuf {
 pub fn start_control_socket_server(
     dir: impl AsRef<Path>,
     settings: Arc<Mutex<UiSettings>>,
+    server_uid: Option<u32>,
     approval_state: Option<Arc<ApprovalPromptState>>,
 ) -> Result<PathBuf> {
     let socket_path = control_socket_path_in_dir(dir.as_ref());
@@ -110,7 +113,7 @@ pub fn start_control_socket_server(
             match stream {
                 Ok(stream) => {
                     if let Err(error) =
-                        handle_connection(stream, &settings, approval_state.as_ref())
+                        handle_connection(stream, &settings, server_uid, approval_state.as_ref())
                     {
                         log::warn!(
                             "IPC connection on {} failed: {error:?}",
@@ -159,8 +162,16 @@ pub fn send_request(socket_path: impl AsRef<Path>, request: &IpcRequest) -> Resu
 fn handle_connection(
     stream: UnixStream,
     settings: &Arc<Mutex<UiSettings>>,
+    server_uid: Option<u32>,
     approval_state: Option<&Arc<ApprovalPromptState>>,
 ) -> Result<()> {
+    let peer_uid = peer_uid(&stream);
+    if !peer_is_authorized(server_uid, peer_uid) {
+        return Err(color_eyre::eyre::eyre!(
+            "rejecting IPC peer uid={peer_uid:?} for server uid={server_uid:?}"
+        ));
+    }
+
     let mut reader = BufReader::new(stream.try_clone().wrap_err("cloning IPC reader stream")?);
     let mut request_json = String::new();
     reader
@@ -200,6 +211,32 @@ fn handle_connection(
     writer.flush().wrap_err("flushing IPC response")
 }
 
+fn peer_is_authorized(server_uid: Option<u32>, peer_uid: Option<u32>) -> bool {
+    matches!(peer_uid, Some(0)) || peer_uid == server_uid
+}
+
+fn peer_uid(stream: &UnixStream) -> Option<u32> {
+    #[cfg(target_os = "linux")]
+    {
+        unsafe {
+            let mut cred: libc::ucred = mem::zeroed();
+            let mut len = mem::size_of::<libc::ucred>() as libc::socklen_t;
+            let result = libc::getsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                &mut cred as *mut libc::ucred as *mut libc::c_void,
+                &mut len,
+            );
+            if result == 0 {
+                return Some(cred.uid);
+            }
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -237,8 +274,9 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("create temp dir");
 
         let settings = Arc::new(Mutex::new(UiSettings::default()));
-        let socket_path =
-            start_control_socket_server(&dir, settings.clone(), None).expect("start server");
+        let server_uid = SessionContext::detect().uid;
+        let socket_path = start_control_socket_server(&dir, settings.clone(), server_uid, None)
+            .expect("start server");
 
         let response =
             super::send_request(&socket_path, &IpcRequest::GetUiSettings).expect("get settings");
@@ -270,5 +308,12 @@ mod tests {
         let response = super::send_request(&socket_path, &IpcRequest::PromptApproval(prompt))
             .expect("prompt approval");
         assert_eq!(response, IpcResponse::ApprovalDecision(true));
+    }
+
+    #[test]
+    fn peer_is_authorized_accepts_root_or_matching_uid() {
+        assert!(super::peer_is_authorized(Some(1000), Some(1000)));
+        assert!(super::peer_is_authorized(Some(1000), Some(0)));
+        assert!(!super::peer_is_authorized(Some(1000), Some(1001)));
     }
 }

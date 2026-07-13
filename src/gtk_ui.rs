@@ -8,7 +8,7 @@ use color_eyre::{Result, eyre::WrapErr};
 use gtk4::glib::{self, ControlFlow};
 use gtk4::{
     Box as GtkBox, Button, Entry, Label, ListBox, ListBoxRow, Notebook, Orientation,
-    ScrolledWindow, prelude::*,
+    ScrolledWindow, Window, prelude::*,
 };
 use libadwaita as adw;
 use libadwaita::prelude::*;
@@ -61,6 +61,7 @@ pub fn launch(config: GtkUiConfig) -> Result<()> {
     let socket_path = ipc::start_control_socket_server(
         &config.store_dir,
         settings_state.clone(),
+        session.uid,
         Some(approval_state.clone()),
     )?;
     log::info!("GTK IPC socket: {}", socket_path.display());
@@ -153,7 +154,7 @@ fn build_ui(
     notebook.set_hexpand(true);
     notebook.set_vexpand(true);
 
-    let approval_page = build_approval_page(session, approval_state);
+    let approval_page = build_approval_page(session);
     let approval_label = Label::new(Some("Approval"));
     notebook.append_page(&approval_page, Some(&approval_label));
 
@@ -169,12 +170,12 @@ fn build_ui(
 
     window.set_content(Some(&notebook));
     window.present();
+
+    let prompt_window = build_prompt_window(app, &window, session, approval_state);
+    prompt_window.hide();
 }
 
-fn build_approval_page(
-    session: &session::SessionContext,
-    approval_state: Arc<ipc::ApprovalPromptState>,
-) -> GtkBox {
+fn build_approval_page(session: &session::SessionContext) -> GtkBox {
     let page = GtkBox::new(Orientation::Vertical, 12);
     page.set_margin_top(24);
     page.set_margin_bottom(24);
@@ -188,12 +189,44 @@ fn build_approval_page(
     let session_label = Label::new(Some(&format!("Session: {}", session.describe())));
     session_label.set_wrap(true);
 
-    let prompt_label = Label::new(Some(
-        "This window will become the GTK approval prompt once the daemon connects it to IPC.",
-    ));
+    page.append(&title);
+    page.append(&session_label);
+    page
+}
+
+fn build_prompt_window(
+    app: &adw::Application,
+    parent: &impl gtk4::prelude::IsA<Window>,
+    session: &session::SessionContext,
+    approval_state: Arc<ipc::ApprovalPromptState>,
+) -> Window {
+    let window = Window::builder()
+        .application(app)
+        .title("Approve authenticator request")
+        .default_width(460)
+        .default_height(240)
+        .build();
+    window.set_transient_for(Some(parent.as_ref()));
+    window.set_modal(true);
+    window.set_destroy_with_parent(true);
+
+    let page = GtkBox::new(Orientation::Vertical, 12);
+    page.set_margin_top(20);
+    page.set_margin_bottom(20);
+    page.set_margin_start(20);
+    page.set_margin_end(20);
+
+    let title = Label::new(Some("Approve authenticator request"));
+    title.add_css_class("title-1");
+    title.set_wrap(true);
+
+    let session_label = Label::new(Some(&format!("Session: {}", session.describe())));
+    session_label.set_wrap(true);
+
+    let prompt_label = Label::new(Some("Waiting for a request."));
     prompt_label.set_wrap(true);
 
-    let result_label = Label::new(Some("Waiting for user action."));
+    let result_label = Label::new(Some(""));
     result_label.set_wrap(true);
 
     let buttons = GtkBox::new(Orientation::Horizontal, 12);
@@ -201,36 +234,25 @@ fn build_approval_page(
     let reject = Button::with_label("Reject");
 
     {
-        let result_label = result_label.clone();
         let approval_state = approval_state.clone();
+        let window = window.clone();
+        let result_label = result_label.clone();
         accept.connect_clicked(move |_| {
             approval_state.respond(true);
             result_label.set_text("Approved.");
+            window.hide();
             log::info!("GTK approval accepted for current session");
         });
     }
     {
-        let result_label = result_label.clone();
         let approval_state = approval_state.clone();
+        let window = window.clone();
+        let result_label = result_label.clone();
         reject.connect_clicked(move |_| {
             approval_state.respond(false);
             result_label.set_text("Rejected.");
+            window.hide();
             log::info!("GTK approval rejected for current session");
-        });
-    }
-
-    {
-        let prompt_label = prompt_label.clone();
-        let result_label = result_label.clone();
-        let approval_state = approval_state.clone();
-        glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
-            if let Some(prompt) = approval_state.snapshot() {
-                prompt_label.set_text(&format!("{}\n{}", prompt.session.describe(), prompt.prompt));
-                result_label.set_text("Waiting for user action.");
-            } else {
-                prompt_label.set_text("Waiting for a request.");
-            }
-            ControlFlow::Continue
         });
     }
 
@@ -242,7 +264,30 @@ fn build_approval_page(
     page.append(&prompt_label);
     page.append(&result_label);
     page.append(&buttons);
-    page
+    window.set_child(Some(&page));
+
+    {
+        let prompt_label = prompt_label.clone();
+        let result_label = result_label.clone();
+        let approval_state = approval_state.clone();
+        let window = window.clone();
+        glib::timeout_add_local(std::time::Duration::from_millis(150), move || {
+            if let Some(prompt) = approval_state.snapshot() {
+                prompt_label.set_text(&format!("{}\n{}", prompt.session.describe(), prompt.prompt));
+                result_label.set_text("Waiting for user action.");
+                if !window.is_visible() {
+                    window.present();
+                }
+            } else if window.is_visible() {
+                window.hide();
+                prompt_label.set_text("Waiting for a request.");
+                result_label.set_text("");
+            }
+            ControlFlow::Continue
+        });
+    }
+
+    window
 }
 
 fn build_settings_page(

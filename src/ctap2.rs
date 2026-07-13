@@ -144,6 +144,8 @@ impl Authenticator {
         let rp = map_map(&request, 2).ok_or(ErrorStatus::MissingParameter)?;
         let user = map_map(&request, 3).ok_or(ErrorStatus::MissingParameter)?;
         let params = map_array(&request, 4).ok_or(ErrorStatus::MissingParameter)?;
+        let cred_props_requested = map_map(&request, 6)
+            .is_some_and(|extensions| map_bool(extensions, "credProps") == Some(true));
 
         if !params.iter().any(supports_es256) {
             return Err(ErrorStatus::UnsupportedAlgorithm);
@@ -228,7 +230,14 @@ impl Authenticator {
         let mut credential_id = vec![0u8; 32];
         fill_random(&mut credential_id);
 
-        let auth_data = make_auth_data(rp_id, 0x41, 0, Some((&credential_id, &public_key)));
+        let extensions = cred_props_requested.then_some(cred_props_extension());
+        let auth_data = make_auth_data(
+            rp_id,
+            0x41,
+            0,
+            Some((&credential_id, &public_key)),
+            extensions.as_ref(),
+        );
         self.credentials.push(Credential {
             id: credential_id,
             rp_id: rp_id.to_owned(),
@@ -292,7 +301,7 @@ impl Authenticator {
         let (auth_data, user, credential_id, key, policy, rp_log, sign_count) = {
             let credential = &self.credentials[credential_index];
             let sign_count = credential.sign_count.saturating_add(1);
-            let auth_data = make_auth_data(&credential.rp_id, 0x01, sign_count, None);
+            let auth_data = make_auth_data(&credential.rp_id, 0x01, sign_count, None, None);
 
             let mut user = vec![(
                 Value::Text("id".to_owned()),
@@ -382,7 +391,7 @@ impl Authenticator {
 
         let credential = &self.credentials[credential_index];
         let sign_count = credential.sign_count.saturating_add(1);
-        let auth_data = make_auth_data(&credential.rp_id, 0x01, sign_count, None);
+        let auth_data = make_auth_data(&credential.rp_id, 0x01, sign_count, None, None);
         let credential_id = credential.id.clone();
         let rp_log = credential.rp_id.clone();
         let credential_key = credential.key.clone();
@@ -557,6 +566,10 @@ fn get_info_response() -> Vec<u8> {
                 Value::Text("FIDO_2_1".to_owned()),
                 Value::Text("FIDO_2_0".to_owned()),
             ]),
+        ),
+        (
+            Value::Integer(2.into()),
+            Value::Array(vec![Value::Text("credProps".to_owned())]),
         ),
         (Value::Integer(3.into()), Value::Bytes(AAGUID.to_vec())),
         (
@@ -779,10 +792,11 @@ fn make_auth_data(
     flags: u8,
     sign_count: u32,
     attested_credential_data: Option<(&[u8], &Value)>,
+    extensions: Option<&Value>,
 ) -> Vec<u8> {
     let mut auth_data = Vec::new();
     auth_data.extend_from_slice(&Sha256::digest(rp_id.as_bytes()));
-    auth_data.push(flags);
+    auth_data.push(flags | if extensions.is_some() { 0x80 } else { 0x00 });
     auth_data.extend_from_slice(&sign_count.to_be_bytes());
 
     if let Some((credential_id, public_key)) = attested_credential_data {
@@ -792,7 +806,18 @@ fn make_auth_data(
         ciborium::into_writer(public_key, &mut auth_data).expect("serializing static COSE key");
     }
 
+    if let Some(extensions) = extensions {
+        ciborium::into_writer(extensions, &mut auth_data).expect("serializing CTAP2 extensions");
+    }
+
     auth_data
+}
+
+fn cred_props_extension() -> Value {
+    Value::Map(vec![(
+        Value::Text("credProps".to_owned()),
+        Value::Map(vec![(Value::Text("rk".to_owned()), Value::Bool(true))]),
+    )])
 }
 
 fn display_rp_label(rp_name: Option<&str>, rp_id: &str) -> String {
@@ -948,6 +973,26 @@ mod tests {
             map_value(&map, 6).is_none(),
             "pinUvAuthProtocols should not contain algorithms"
         );
+        assert_eq!(
+            map_value(&map, 2),
+            Some(&Value::Array(vec![Value::Text("credProps".to_owned())]))
+        );
+    }
+
+    #[test]
+    fn make_auth_data_sets_extension_flag_when_extensions_are_present() {
+        let auth_data = make_auth_data(
+            "example.com",
+            0x41,
+            0,
+            Some((
+                &[1, 2, 3, 4],
+                &cose_public_key_coordinates(vec![5; 32], vec![6; 32]),
+            )),
+            Some(&cred_props_extension()),
+        );
+
+        assert_ne!(auth_data[32] & 0x80, 0);
     }
 
     #[test]

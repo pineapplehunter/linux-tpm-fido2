@@ -39,16 +39,19 @@ pub struct SessionContext {
 
 impl SessionContext {
     pub fn detect() -> Self {
+        let uid = env::var("SUDO_UID")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .or_else(|| env::var("UID").ok().and_then(|value| value.parse().ok()))
+            .or_else(|| Some(unsafe { libc::geteuid() }));
+
         Self {
             model: DaemonSessionModel::default(),
             user: env::var("SUDO_USER")
                 .ok()
                 .filter(|value| !value.is_empty())
                 .or_else(|| env::var("USER").ok().filter(|value| !value.is_empty())),
-            uid: env::var("SUDO_UID")
-                .ok()
-                .and_then(|value| value.parse().ok())
-                .or_else(|| env::var("UID").ok().and_then(|value| value.parse().ok())),
+            uid,
             session_id: env::var("XDG_SESSION_ID")
                 .ok()
                 .filter(|value| !value.is_empty()),

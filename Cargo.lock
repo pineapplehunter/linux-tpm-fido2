@@ -1549,6 +1549,7 @@ dependencies = [
  "getrandom 0.4.3",
  "gtk4",
  "libadwaita",
+ "libc",
  "log",
  "p256",
  "rcgen",

@@ -10,7 +10,7 @@ It exposes a browser-usable virtual HID authenticator, stores credentials in SQL
 - Creates TPM-backed P-256 credentials for registration and assertion.
 - Supports secure-boot PCR-bound credentials.
 - Supports recovery material unlocked by a passphrase and kept TPM-bound.
-- Exposes a GTK4 control surface for approval and settings.
+- Exposes a GTK4 control surface for approval and settings, including a modal approval popup and Unix peer checks.
 - Uses a Unix-socket IPC seam between the daemon and the GTK control surface.
 
 ## Usage
@@ -43,7 +43,7 @@ Useful flags:
 
 ## Future Work
 
-- Finish wiring the GTK control surface into daemon-side approval IPC.
+- Expand CTAP2 compatibility for additional browser request shapes.
 - Expand CTAP2 compatibility for additional browser request shapes.
 - Harden the storage model toward production metadata and unlock mechanisms.
 - Decide on the long-term daemon/session model before expanding the UI.

@@ -99,8 +99,9 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("create temp dir");
 
         let settings = Arc::new(Mutex::new(UiSettings::default()));
-        let _socket_path =
-            ipc::start_control_socket_server(&dir, settings, None).expect("start ipc server");
+        let server_uid = SessionContext::detect().uid;
+        let _socket_path = ipc::start_control_socket_server(&dir, settings, server_uid, None)
+            .expect("start ipc server");
 
         let session = SessionContext {
             model: DaemonSessionModel::ActiveGraphicalSession,
