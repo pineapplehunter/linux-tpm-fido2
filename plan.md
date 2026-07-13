@@ -8,7 +8,9 @@
 - Browser registration and authentication work in Firefox with TPM-backed CTAP2 credentials persisted in SQLite.
 - CTAP2 works through `CTAPHID_CBOR` with `authenticatorGetInfo`, `authenticatorMakeCredential`, and `authenticatorGetAssertion`.
 - `authenticatorMakeCredential` handles `excludeList` for existing credentials and returns `CTAP2_ERR_CREDENTIAL_EXCLUDED` before prompting or creating TPM keys.
-- `authenticatorGetAssertion` handles absent, empty, matching, and non-matching `allowList` descriptors.
+- `authenticatorGetAssertion` handles absent, empty, matching, and non-matching `allowList` descriptors, returns `numberOfCredentials` when multiple credentials match, and supports `authenticatorGetNextAssertion`.
+- Malformed `allowList` and `excludeList` entries are rejected as invalid CBOR.
+- CTAP2 options are partially validated: `up=true` is accepted, `up=false` is rejected, `uv=true` is rejected because user verification is not implemented, and `rk` is accepted for local stored credentials.
 - CLI yes/no prompts provide early user-presence approval for CTAP2 registration/authentication.
 - Development credentials are persisted in a project-local, git-ignored store.
 - Startup logs the exact SQLite credential database path.
@@ -39,7 +41,7 @@
 ## Next Milestones
 
 1. Test TPM-backed CTAP2 registration/login against Chrome, including daemon restart.
-2. Improve CTAP2 request handling enough for robust browser behavior: options, user presence flags, request validation, multiple assertion responses, and better CTAP status codes.
+2. Improve CTAP2 request handling enough for robust browser behavior: extension handling and any remaining status-code edge cases.
 3. Add PCR-bound credential creation and assertion, starting with secure boot state.
 4. Add recovery slots using passphrase-unlocked material that remains TPM-bound but is not PCR-bound.
 5. Evolve the SQLite schema toward LUKS2-inspired keyslots, tokens, policy descriptors, digests, and recovery metadata.

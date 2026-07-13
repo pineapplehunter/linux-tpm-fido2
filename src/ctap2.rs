@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 
 pub const CMD_AUTHENTICATOR_MAKE_CREDENTIAL: u8 = 0x01;
 pub const CMD_AUTHENTICATOR_GET_ASSERTION: u8 = 0x02;
+pub const CMD_AUTHENTICATOR_GET_NEXT_ASSERTION: u8 = 0x08;
 pub const CMD_AUTHENTICATOR_GET_INFO: u8 = 0x04;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,6 +21,7 @@ enum ErrorStatus {
     CredentialExcluded = 0x19,
     UnsupportedAlgorithm = 0x26,
     OperationDenied = 0x27,
+    UnsupportedOption = 0x2b,
     NoCredentials = 0x2e,
 }
 
@@ -40,11 +42,19 @@ pub struct Authenticator {
     tpm: Option<tpm::Tpm>,
     credentials: Vec<Credential>,
     recent_assertion_approval: Option<RecentAssertionApproval>,
+    pending_assertion: Option<PendingAssertion>,
 }
 
 struct RecentAssertionApproval {
     rp_id: String,
     expires_at: Instant,
+}
+
+struct PendingAssertion {
+    rp_id: String,
+    client_data_hash: Vec<u8>,
+    credential_indexes: Vec<usize>,
+    total_credentials: usize,
 }
 
 struct Credential {
@@ -99,6 +109,7 @@ impl Authenticator {
             tpm,
             credentials,
             recent_assertion_approval: None,
+            pending_assertion: None,
         }
     }
 
@@ -113,6 +124,7 @@ impl Authenticator {
             CMD_AUTHENTICATOR_GET_INFO => Ok(get_info_response()),
             CMD_AUTHENTICATOR_MAKE_CREDENTIAL => self.make_credential(body),
             CMD_AUTHENTICATOR_GET_ASSERTION => self.get_assertion(body),
+            CMD_AUTHENTICATOR_GET_NEXT_ASSERTION => self.get_next_assertion(body),
             _ => Err(ErrorStatus::InvalidCommand),
         } {
             Ok(response) => response,
@@ -138,6 +150,8 @@ impl Authenticator {
         let user_handle = map_bytes(user, "id").ok_or(ErrorStatus::MissingParameter)?;
         let user_name = map_text(user, "name");
         let user_display_name = map_text(user, "displayName");
+        validate_make_credential_options(map_map(&request, 7))?;
+        validate_credential_descriptor_list(map_array(&request, 5))?;
         if excluded_credential_exists(&self.credentials, rp_id, map_array(&request, 5)) {
             log::info!("makeCredential excluded existing credential for rp_id={rp_id}");
             return Err(ErrorStatus::CredentialExcluded);
@@ -198,16 +212,28 @@ impl Authenticator {
         let rp_id = map_text(&request, 1).ok_or(ErrorStatus::MissingParameter)?;
         let client_data_hash = map_bytes(&request, 2).ok_or(ErrorStatus::MissingParameter)?;
         let allow_list = map_array(&request, 3);
+        validate_get_assertion_options(map_map(&request, 5))?;
+        validate_credential_descriptor_list(allow_list)?;
 
-        let Some(credential_index) = self.credentials.iter().position(|credential| {
-            credential.rp_id == rp_id && allow_list_allows(allow_list, &credential.id)
-        }) else {
+        let credential_indexes = matching_credential_indexes(&self.credentials, rp_id, allow_list);
+        let Some((&credential_index, remaining_indexes)) = credential_indexes.split_first() else {
             return Err(ErrorStatus::NoCredentials);
         };
 
         if !self.assertion_approved(rp_id) {
             return Err(ErrorStatus::OperationDenied);
         }
+
+        self.pending_assertion = if remaining_indexes.is_empty() {
+            None
+        } else {
+            Some(PendingAssertion {
+                rp_id: rp_id.to_owned(),
+                client_data_hash: client_data_hash.to_vec(),
+                credential_indexes: remaining_indexes.to_vec(),
+                total_credentials: credential_indexes.len(),
+            })
+        };
 
         let (auth_data, user, credential_id, key, rp_log, sign_count) = {
             let credential = &self.credentials[credential_index];
@@ -265,21 +291,89 @@ impl Authenticator {
             sign_count
         );
 
-        Ok(encode_response(Value::Map(vec![
-            (
-                Value::Integer(1.into()),
-                Value::Map(vec![
-                    (
-                        Value::Text("type".to_owned()),
-                        Value::Text("public-key".to_owned()),
-                    ),
-                    (Value::Text("id".to_owned()), Value::Bytes(credential_id)),
-                ]),
-            ),
-            (Value::Integer(2.into()), Value::Bytes(auth_data)),
-            (Value::Integer(3.into()), Value::Bytes(signature)),
-            (Value::Integer(4.into()), Value::Map(user)),
-        ])))
+        Ok(encode_assertion_response(
+            credential_id,
+            auth_data,
+            signature,
+            user,
+            credential_indexes.len(),
+        ))
+    }
+
+    fn get_next_assertion(&mut self, body: &[u8]) -> Result<Vec<u8>, ErrorStatus> {
+        if !body.is_empty() {
+            return Err(ErrorStatus::InvalidCbor);
+        }
+
+        let Some(pending) = self.pending_assertion.take() else {
+            return Err(ErrorStatus::NoCredentials);
+        };
+
+        let Some((&credential_index, remaining_indexes)) = pending.credential_indexes.split_first()
+        else {
+            return Err(ErrorStatus::NoCredentials);
+        };
+
+        self.pending_assertion = if remaining_indexes.is_empty() {
+            None
+        } else {
+            Some(PendingAssertion {
+                rp_id: pending.rp_id.clone(),
+                client_data_hash: pending.client_data_hash.clone(),
+                credential_indexes: remaining_indexes.to_vec(),
+                total_credentials: pending.total_credentials,
+            })
+        };
+
+        let credential = &self.credentials[credential_index];
+        let sign_count = credential.sign_count.saturating_add(1);
+        let auth_data = make_auth_data(&credential.rp_id, 0x01, sign_count, None);
+        let credential_id = credential.id.clone();
+        let rp_log = credential.rp_id.clone();
+        let credential_key = credential.key.clone();
+        let user_handle = credential.user_handle.clone();
+        let user_name = credential.user_name.clone();
+        let user_display_name = credential.user_display_name.clone();
+        let mut user = vec![(Value::Text("id".to_owned()), Value::Bytes(user_handle))];
+        if let Some(name) = &user_name {
+            user.push((Value::Text("name".to_owned()), Value::Text(name.clone())));
+        }
+        if let Some(display_name) = &user_display_name {
+            user.push((
+                Value::Text("displayName".to_owned()),
+                Value::Text(display_name.clone()),
+            ));
+        }
+
+        let mut signed_data = auth_data.clone();
+        signed_data.extend_from_slice(&pending.client_data_hash);
+        let signature = match sign_credential(&mut self.tpm, &credential_key, &signed_data) {
+            Ok(signature) => signature,
+            Err(error) => {
+                log::warn!("failed to sign CTAP2 next assertion: {error:?}");
+                return Err(ErrorStatus::OperationDenied);
+            }
+        };
+
+        if let Err(error) =
+            store::update_ctap2_sign_count_in_dir(&self.store_dir, &credential_id, sign_count)
+        {
+            log::warn!(
+                "failed to persist CTAP2 next assertion sign_count for rp_id={}: {error:?}",
+                rp_log
+            );
+            return Err(ErrorStatus::OperationDenied);
+        }
+
+        self.credentials[credential_index].sign_count = sign_count;
+
+        Ok(encode_assertion_response(
+            credential_id,
+            auth_data,
+            signature,
+            user,
+            pending.total_credentials,
+        ))
     }
 
     fn save_credentials(&self) {
@@ -348,6 +442,7 @@ pub fn command_name(command: u8) -> &'static str {
     match command {
         CMD_AUTHENTICATOR_MAKE_CREDENTIAL => "authenticatorMakeCredential",
         CMD_AUTHENTICATOR_GET_ASSERTION => "authenticatorGetAssertion",
+        CMD_AUTHENTICATOR_GET_NEXT_ASSERTION => "authenticatorGetNextAssertion",
         CMD_AUTHENTICATOR_GET_INFO => "authenticatorGetInfo",
         _ => "unknown",
     }
@@ -435,6 +530,10 @@ fn map_text<K: MapKey>(map: &[(Value, Value)], key: K) -> Option<&str> {
     map_value(map, key).and_then(Value::as_text)
 }
 
+fn map_bool<K: MapKey>(map: &[(Value, Value)], key: K) -> Option<bool> {
+    map_value(map, key).and_then(Value::as_bool)
+}
+
 fn map_array<K: MapKey>(map: &[(Value, Value)], key: K) -> Option<&[Value]> {
     map_value(map, key)
         .and_then(Value::as_array)
@@ -458,6 +557,54 @@ fn supports_es256(value: &Value) -> bool {
             == Some(COSE_ALG_ES256)
 }
 
+fn validate_make_credential_options(options: Option<&[(Value, Value)]>) -> Result<(), ErrorStatus> {
+    validate_common_options(options)?;
+    // Discoverable credentials are acceptable because credentials are stored locally.
+    let _rk = options.and_then(|options| map_bool(options, "rk"));
+    Ok(())
+}
+
+fn validate_get_assertion_options(options: Option<&[(Value, Value)]>) -> Result<(), ErrorStatus> {
+    validate_common_options(options)
+}
+
+fn validate_credential_descriptor_list(list: Option<&[Value]>) -> Result<(), ErrorStatus> {
+    let Some(list) = list else {
+        return Ok(());
+    };
+
+    for entry in list {
+        let Value::Map(map) = entry else {
+            return Err(ErrorStatus::InvalidCbor);
+        };
+        if map_text(map, "type") != Some("public-key") {
+            return Err(ErrorStatus::InvalidCbor);
+        }
+        if map_bytes(map, "id").is_none() {
+            return Err(ErrorStatus::InvalidCbor);
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_common_options(options: Option<&[(Value, Value)]>) -> Result<(), ErrorStatus> {
+    let Some(options) = options else {
+        return Ok(());
+    };
+
+    if map_bool(options, "uv") == Some(true) {
+        log::info!("request requires user verification, which is not implemented");
+        return Err(ErrorStatus::UnsupportedOption);
+    }
+    if map_bool(options, "up") == Some(false) {
+        log::info!("request disables user presence, which is not supported");
+        return Err(ErrorStatus::UnsupportedOption);
+    }
+
+    Ok(())
+}
+
 fn excluded_credential_exists(
     credentials: &[Credential],
     rp_id: &str,
@@ -479,6 +626,21 @@ fn allow_list_allows(allow_list: Option<&[Value]>, credential_id: &[u8]) -> bool
     };
 
     credential_descriptor_list_contains(allow_list, credential_id)
+}
+
+fn matching_credential_indexes(
+    credentials: &[Credential],
+    rp_id: &str,
+    allow_list: Option<&[Value]>,
+) -> Vec<usize> {
+    credentials
+        .iter()
+        .enumerate()
+        .filter_map(|(index, credential)| {
+            (credential.rp_id == rp_id && allow_list_allows(allow_list, &credential.id))
+                .then_some(index)
+        })
+        .collect()
 }
 
 fn credential_descriptor_list_contains(list: &[Value], credential_id: &[u8]) -> bool {
@@ -511,6 +673,39 @@ fn make_auth_data(
     auth_data
 }
 
+fn encode_assertion_response(
+    credential_id: Vec<u8>,
+    auth_data: Vec<u8>,
+    signature: Vec<u8>,
+    user: Vec<(Value, Value)>,
+    total_credentials: usize,
+) -> Vec<u8> {
+    let mut response = vec![
+        (
+            Value::Integer(1.into()),
+            Value::Map(vec![
+                (
+                    Value::Text("type".to_owned()),
+                    Value::Text("public-key".to_owned()),
+                ),
+                (Value::Text("id".to_owned()), Value::Bytes(credential_id)),
+            ]),
+        ),
+        (Value::Integer(2.into()), Value::Bytes(auth_data)),
+        (Value::Integer(3.into()), Value::Bytes(signature)),
+        (Value::Integer(4.into()), Value::Map(user)),
+    ];
+
+    if total_credentials > 1 {
+        response.push((
+            Value::Integer(5.into()),
+            Value::Integer((total_credentials as u64).into()),
+        ));
+    }
+
+    encode_response(Value::Map(response))
+}
+
 fn cose_credential_public_key(key: &tpm::TpmCredential) -> Value {
     cose_public_key_coordinates(key.public_key_x.clone(), key.public_key_y.clone())
 }
@@ -533,9 +728,18 @@ fn sign_credential(
     key: &tpm::TpmCredential,
     signed_data: &[u8],
 ) -> color_eyre::Result<Vec<u8>> {
-    let tpm = tpm
-        .as_mut()
-        .ok_or_else(|| color_eyre::eyre::eyre!("TPM credential requires TPM context"))?;
+    let Some(tpm) = tpm.as_mut() else {
+        #[cfg(test)]
+        {
+            return Ok(vec![0x5a; 64]);
+        }
+        #[cfg(not(test))]
+        {
+            return Err(color_eyre::eyre::eyre!(
+                "TPM credential requires TPM context"
+            ));
+        }
+    };
     let digest = Sha256::digest(signed_data);
     tpm.sign_digest(key, &digest)
 }
@@ -658,26 +862,254 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn make_credential_options_accept_absent_up_true_and_rk() {
+        assert_eq!(validate_make_credential_options(None), Ok(()));
+        assert_eq!(
+            validate_make_credential_options(Some(&options_map(&[
+                ("up", true),
+                ("rk", true),
+                ("unknown", true),
+            ]))),
+            Ok(())
+        );
+        assert_eq!(
+            validate_make_credential_options(Some(&options_map(&[("rk", false)]))),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn get_assertion_options_accept_absent_and_up_true() {
+        assert_eq!(validate_get_assertion_options(None), Ok(()));
+        assert_eq!(
+            validate_get_assertion_options(Some(&options_map(&[("up", true)]))),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn options_reject_required_user_verification() {
+        assert_eq!(
+            validate_make_credential_options(Some(&options_map(&[("uv", true)]))),
+            Err(ErrorStatus::UnsupportedOption)
+        );
+        assert_eq!(
+            validate_get_assertion_options(Some(&options_map(&[("uv", true)]))),
+            Err(ErrorStatus::UnsupportedOption)
+        );
+    }
+
+    #[test]
+    fn options_reject_disabled_user_presence() {
+        assert_eq!(
+            validate_make_credential_options(Some(&options_map(&[("up", false)]))),
+            Err(ErrorStatus::UnsupportedOption)
+        );
+        assert_eq!(
+            validate_get_assertion_options(Some(&options_map(&[("up", false)]))),
+            Err(ErrorStatus::UnsupportedOption)
+        );
+    }
+
+    #[test]
+    fn multiple_matching_credentials_include_number_of_credentials_and_support_next_assertion() {
+        let mut authenticator = authenticator_with_credentials(
+            "example.com",
+            vec![
+                test_credential(vec![1], "example.com", 1),
+                test_credential(vec![2], "example.com", 2),
+            ],
+        );
+
+        let response = authenticator.handle_cbor(&ctap_request(
+            CMD_AUTHENTICATOR_GET_ASSERTION,
+            Value::Map(vec![
+                (
+                    Value::Integer(1.into()),
+                    Value::Text("example.com".to_owned()),
+                ),
+                (Value::Integer(2.into()), Value::Bytes(vec![0xaa; 32])),
+            ]),
+        ));
+
+        assert_eq!(response[0], 0x00);
+        let Value::Map(map) = ciborium::from_reader::<Value, _>(&response[1..]).expect("CBOR")
+        else {
+            panic!("expected assertion map");
+        };
+        assert_eq!(map_value(&map, 5), Some(&Value::Integer(2.into())));
+
+        let next = authenticator.handle_cbor(&[CMD_AUTHENTICATOR_GET_NEXT_ASSERTION]);
+        assert_eq!(next[0], 0x00);
+        let Value::Map(next_map) = ciborium::from_reader::<Value, _>(&next[1..]).expect("CBOR")
+        else {
+            panic!("expected next assertion map");
+        };
+        assert_eq!(map_value(&next_map, 5), Some(&Value::Integer(2.into())));
+
+        let first_id = map_value(&map, 1)
+            .and_then(Value::as_map)
+            .and_then(|map| map_bytes(map, "id"))
+            .expect("first credential id");
+        let next_id = map_value(&next_map, 1)
+            .and_then(Value::as_map)
+            .and_then(|map| map_bytes(map, "id"))
+            .expect("next credential id");
+        assert_ne!(first_id, next_id);
+    }
+
+    #[test]
+    fn malformed_allow_list_and_exclude_list_are_rejected() {
+        let mut authenticator = Authenticator::default();
+
+        let make_credential = ctap_request(
+            CMD_AUTHENTICATOR_MAKE_CREDENTIAL,
+            Value::Map(vec![
+                (Value::Integer(1.into()), Value::Bytes(vec![0xaa; 32])),
+                (
+                    Value::Integer(2.into()),
+                    Value::Map(vec![(
+                        Value::Text("id".to_owned()),
+                        Value::Text("example.com".to_owned()),
+                    )]),
+                ),
+                (
+                    Value::Integer(3.into()),
+                    Value::Map(vec![(Value::Text("id".to_owned()), Value::Bytes(vec![1]))]),
+                ),
+                (
+                    Value::Integer(4.into()),
+                    Value::Array(vec![Value::Map(vec![
+                        (
+                            Value::Text("type".to_owned()),
+                            Value::Text("public-key".to_owned()),
+                        ),
+                        (Value::Text("alg".to_owned()), Value::Integer((-7).into())),
+                    ])]),
+                ),
+                (
+                    Value::Integer(5.into()),
+                    Value::Array(vec![Value::Text("not-a-descriptor".to_owned())]),
+                ),
+                (
+                    Value::Integer(7.into()),
+                    Value::Map(vec![(Value::Text("up".to_owned()), Value::Bool(true))]),
+                ),
+            ]),
+        );
+        assert_eq!(authenticator.handle_cbor(&make_credential)[0], 0x12);
+
+        let get_assertion = ctap_request(
+            CMD_AUTHENTICATOR_GET_ASSERTION,
+            Value::Map(vec![
+                (
+                    Value::Integer(1.into()),
+                    Value::Text("example.com".to_owned()),
+                ),
+                (Value::Integer(2.into()), Value::Bytes(vec![0xaa; 32])),
+                (
+                    Value::Integer(3.into()),
+                    Value::Array(vec![Value::Text("bad-entry".to_owned())]),
+                ),
+            ]),
+        );
+        assert_eq!(authenticator.handle_cbor(&get_assertion)[0], 0x12);
+    }
+
     fn authenticator_with_credential(rp_id: &str, credential_id: Vec<u8>) -> Authenticator {
-        Authenticator {
-            store_dir: PathBuf::from("."),
-            tpm: None,
-            credentials: vec![Credential {
-                id: credential_id,
+        authenticator_with_credentials(rp_id, vec![test_credential(credential_id, rp_id, 0)])
+    }
+
+    fn authenticator_with_credentials(
+        rp_id: &str,
+        credentials: Vec<StoredCredentialTest>,
+    ) -> Authenticator {
+        let store_dir = test_store_dir("authenticator");
+        let stored_credentials: Vec<_> = credentials
+            .iter()
+            .map(|credential| store::StoredCtap2Credential {
+                id: credential.id.clone(),
                 rp_id: rp_id.to_owned(),
-                user_handle: vec![5, 6, 7, 8],
-                user_name: Some("user".to_owned()),
-                user_display_name: Some("Test User".to_owned()),
-                key: tpm::TpmCredential {
-                    private: vec![9],
-                    public: vec![10],
-                    public_key_x: vec![11; 32],
-                    public_key_y: vec![12; 32],
+                user_handle: credential.user_handle.clone(),
+                user_name: credential.user_name.clone(),
+                user_display_name: credential.user_display_name.clone(),
+                key: store::StoredTpmKey {
+                    private: credential.key.private.clone(),
+                    public: credential.key.public.clone(),
+                    public_key_x: credential.key.public_key_x.clone(),
+                    public_key_y: credential.key.public_key_y.clone(),
                 },
-                sign_count: 0,
-            }],
-            recent_assertion_approval: None,
+                sign_count: credential.sign_count,
+            })
+            .collect();
+        store::save_ctap2_credentials_to_dir(&store_dir, &stored_credentials)
+            .expect("save test credentials");
+
+        Authenticator {
+            store_dir,
+            tpm: None,
+            credentials: credentials
+                .into_iter()
+                .map(|credential| Credential {
+                    id: credential.id,
+                    rp_id: rp_id.to_owned(),
+                    user_handle: credential.user_handle,
+                    user_name: credential.user_name,
+                    user_display_name: credential.user_display_name,
+                    key: credential.key,
+                    sign_count: credential.sign_count,
+                })
+                .collect(),
+            recent_assertion_approval: Some(RecentAssertionApproval {
+                rp_id: rp_id.to_owned(),
+                expires_at: Instant::now() + ASSERTION_APPROVAL_GRACE,
+            }),
+            pending_assertion: None,
         }
+    }
+
+    struct StoredCredentialTest {
+        id: Vec<u8>,
+        user_handle: Vec<u8>,
+        user_name: Option<String>,
+        user_display_name: Option<String>,
+        key: tpm::TpmCredential,
+        sign_count: u32,
+    }
+
+    fn test_credential(id: Vec<u8>, rp_id: &str, sign_count: u32) -> StoredCredentialTest {
+        let user_suffix = id.first().copied().unwrap_or_default();
+        StoredCredentialTest {
+            id,
+            user_handle: vec![5, 6, 7, 8],
+            user_name: Some(format!("user-{user_suffix}")),
+            user_display_name: Some(format!("Test User {rp_id}")),
+            key: tpm::TpmCredential {
+                private: vec![9],
+                public: vec![10],
+                public_key_x: vec![11; 32],
+                public_key_y: vec![12; 32],
+            },
+            sign_count,
+        }
+    }
+
+    fn ctap_request(command: u8, body: Value) -> Vec<u8> {
+        let mut payload = vec![command];
+        ciborium::into_writer(&body, &mut payload).expect("serialize CTAP request");
+        payload
+    }
+
+    fn test_store_dir(name: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time after Unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "linux-tpm-fido2-ctap2-test-{name}-{}-{nonce}",
+            std::process::id()
+        ))
     }
 
     fn credential_descriptor(id: Vec<u8>) -> Value {
@@ -688,5 +1120,12 @@ mod tests {
             ),
             (Value::Text("id".to_owned()), Value::Bytes(id)),
         ])
+    }
+
+    fn options_map(options: &[(&str, bool)]) -> Vec<(Value, Value)> {
+        options
+            .iter()
+            .map(|(key, value)| (Value::Text((*key).to_owned()), Value::Bool(*value)))
+            .collect()
     }
 }
