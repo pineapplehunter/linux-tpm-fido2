@@ -4,7 +4,10 @@ use std::{
 };
 
 use base64::{Engine, engine::general_purpose::STANDARD};
-use color_eyre::{Result, eyre::WrapErr};
+use color_eyre::{
+    Result,
+    eyre::{WrapErr, eyre},
+};
 use serde::{Deserialize, Serialize};
 
 pub const DEV_STORE_DIR: &str = ".linux-tpm-fido2-store";
@@ -70,8 +73,22 @@ pub fn load_ctap2_credentials_from_dir(
     }
 
     let data = fs::read_to_string(&path).wrap_err_with(|| format!("reading {}", path.display()))?;
-    let file: Ctap2CredentialFile =
-        serde_json::from_str(&data).wrap_err_with(|| format!("parsing {}", path.display()))?;
+    let file: Ctap2CredentialFile = serde_json::from_str(&data).wrap_err_with(|| {
+        format!(
+            "parsing {} as a TPM-backed CTAP2 credential store; \
+             if this is an old development store with removed software credentials, \
+             delete or recreate the store directory",
+            path.display()
+        )
+    })?;
+
+    if file.version != 1 {
+        return Err(eyre!(
+            "unsupported CTAP2 credential store version {} in {}; expected version 1",
+            file.version,
+            path.display()
+        ));
+    }
 
     file.credentials
         .into_iter()
@@ -179,6 +196,57 @@ mod tests {
         let loaded = load_ctap2_credentials_from_dir(&dir).expect("load CTAP2 credentials");
 
         assert_eq!(loaded, credentials);
+        fs::remove_dir_all(&dir).expect("remove test store");
+    }
+
+    #[test]
+    fn unsupported_store_version_is_rejected() {
+        let dir = test_store_dir("unsupported-version");
+        fs::create_dir_all(&dir).expect("create test store");
+        fs::write(
+            ctap2_credentials_path_in_dir(&dir),
+            r#"{"version":2,"credentials":[]}"#,
+        )
+        .expect("write test store");
+
+        let error = load_ctap2_credentials_from_dir(&dir).expect_err("reject version");
+
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported CTAP2 credential store version 2")
+        );
+        fs::remove_dir_all(&dir).expect("remove test store");
+    }
+
+    #[test]
+    fn old_development_store_parse_error_includes_reset_hint() {
+        let dir = test_store_dir("old-software-record");
+        fs::create_dir_all(&dir).expect("create test store");
+        fs::write(
+            ctap2_credentials_path_in_dir(&dir),
+            r#"{
+              "version": 1,
+              "credentials": [{
+                "id": "AQIDBA==",
+                "rp_id": "example.com",
+                "user_handle": "BQYHCA==",
+                "user_name": "user",
+                "user_display_name": "Test User",
+                "private_key": "legacy-software-key",
+                "public_key_x": "DQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0=",
+                "public_key_y": "Dg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4ODg4=",
+                "sign_count": 10
+              }]
+            }"#,
+        )
+        .expect("write old test store");
+
+        let error = load_ctap2_credentials_from_dir(&dir).expect_err("reject old store");
+        let error = format!("{error:?}");
+
+        assert!(error.contains("old development store"));
+        assert!(error.contains("removed software credentials"));
         fs::remove_dir_all(&dir).expect("remove test store");
     }
 
