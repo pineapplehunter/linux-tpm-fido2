@@ -9,7 +9,7 @@
     - nix fmt
 - Fixup cargo clippy after a POC implementation
 - When writing bash scripts for nix, generally keep the script in a separate file and use lib.readFile to import it.
-- Create a todolist to accomplish each task.
+- Create a todolist with the todowrite tool for each task to keep track of progress. The last task should be "Start next task in plan.md" which should update the todolist with the next task.
 - Update README and AGENTS.md when a new feature gets implemented or the implementation changed from the original docs.
 - Use bullet points on tha plan.md to reduce git diff.
 - The user may add tasks in the list.
@@ -43,15 +43,18 @@
 - [x] Daemon/user-session model is now explicit: a system daemon routes approvals against the active graphical session and logs session identity at startup.
 - [x] GTK approval and settings UI prototype exists as a standalone GTK4 control surface.
 - [x] CTAP2 requests with `uv=true` continue through the local approval flow instead of failing with `UnsupportedOption`.
+- [x] GTK control surface exposes a Unix-socket IPC seam and the daemon logs the matching socket path.
 
 ## In Progress
 
-- [ ] GTK approval/settings UI is gaining TOML-backed preferences and a save action; daemon IPC wiring remains.
-
 ## Next
 
+- [ ] Use libadwaita for gtk app
+- [ ] Explain the architecture of the program in architecture.md . Show the interactions with the browser, device, daemon and the gtk app.
+- [ ] Perform a security audit. create a security.md with the threat model contents. If the threat model is not clear write what you know and Add this task to future work.
 - [ ] Improve CTAP2 request handling for browser edge cases.
 - [ ] Add GTK approval and settings UI after transport, TPM, and storage are stable.
+- [ ] Update README. Remove development information. Create a new one from scratch. Add the project intension, how to use it, list of features, future works.
 
 ## Architecture Direction
 

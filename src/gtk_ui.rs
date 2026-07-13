@@ -1,6 +1,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
 };
 
 use color_eyre::{Result, eyre::WrapErr};
@@ -10,7 +11,7 @@ use gtk4::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{session, store};
+use crate::{ipc, session, store};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialSummary {
@@ -51,13 +52,24 @@ impl Default for GtkUiConfig {
 pub fn launch(config: GtkUiConfig) -> Result<()> {
     let credentials = load_credential_summaries(&config.store_dir)?;
     let settings = load_ui_settings_from_dir(&config.store_dir)?;
+    let settings_state = Arc::new(Mutex::new(settings.clone()));
     let session = session::SessionContext::detect();
+    let socket_path = ipc::start_control_socket_server(&config.store_dir, settings_state.clone())?;
+    log::info!("GTK IPC socket: {}", socket_path.display());
     let app = Application::builder()
         .application_id("org.linux_tpm_fido2.control")
         .build();
 
     app.connect_activate(move |app| {
-        build_ui(app, &session, &config.store_dir, &credentials, &settings);
+        build_ui(
+            app,
+            &session,
+            &config.store_dir,
+            &credentials,
+            &settings,
+            settings_state.clone(),
+            &socket_path,
+        );
     });
 
     let _code = app.run();
@@ -114,6 +126,8 @@ fn build_ui(
     store_dir: &Path,
     credentials: &[CredentialSummary],
     settings: &UiSettings,
+    settings_state: Arc<Mutex<UiSettings>>,
+    socket_path: &Path,
 ) {
     let window = ApplicationWindow::builder()
         .application(app)
@@ -130,7 +144,13 @@ fn build_ui(
     let approval_label = Label::new(Some("Approval"));
     notebook.append_page(&approval_page, Some(&approval_label));
 
-    let settings_page = build_settings_page(store_dir, credentials, settings);
+    let settings_page = build_settings_page(
+        store_dir,
+        credentials,
+        settings,
+        settings_state,
+        socket_path,
+    );
     let settings_label = Label::new(Some("Settings"));
     notebook.append_page(&settings_page, Some(&settings_label));
 
@@ -194,6 +214,8 @@ fn build_settings_page(
     store_dir: &Path,
     credentials: &[CredentialSummary],
     settings: &UiSettings,
+    settings_state: Arc<Mutex<UiSettings>>,
+    socket_path: &Path,
 ) -> GtkBox {
     let page = GtkBox::new(Orientation::Vertical, 12);
     page.set_margin_top(24);
@@ -222,6 +244,9 @@ fn build_settings_page(
     )));
     save_status.set_wrap(true);
 
+    let ipc_status = Label::new(Some(&format!("IPC socket: {}", socket_path.display())));
+    ipc_status.set_wrap(true);
+
     let pinned_label = Label::new(Some("Pinned passkey IDs"));
     pinned_label.add_css_class("heading");
     pinned_label.set_wrap(true);
@@ -236,6 +261,7 @@ fn build_settings_page(
         let pinned_entry = pinned_entry.clone();
         let recovery_entry = recovery_entry.clone();
         let save_status = save_status.clone();
+        let settings_state = settings_state.clone();
         save_button.connect_clicked(move |_| {
             let pinned_relying_parties = pinned_entry
                 .text()
@@ -251,6 +277,7 @@ fn build_settings_page(
 
             match save_ui_settings_to_dir(&store_dir, &settings) {
                 Ok(()) => {
+                    *settings_state.lock().expect("settings lock") = settings.clone();
                     save_status.set_text(&format!(
                         "Saved settings to {}",
                         ui_settings_path_in_dir(&store_dir).display()
@@ -288,6 +315,7 @@ fn build_settings_page(
     form.append(&recovery_hint);
     form.append(&save_button);
     form.append(&save_status);
+    form.append(&ipc_status);
 
     let scroller = ScrolledWindow::new();
     scroller.set_hexpand(true);

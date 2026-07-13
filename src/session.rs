@@ -1,6 +1,8 @@
 use std::env;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DaemonSessionModel {
     ActiveGraphicalSession,
     PerUserDaemon,
@@ -23,7 +25,7 @@ impl Default for DaemonSessionModel {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionContext {
     pub model: DaemonSessionModel,
     pub user: Option<String>,
