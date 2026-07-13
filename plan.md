@@ -46,6 +46,7 @@
 - [x] GTK control socket authenticates peers with Unix peer credentials before honoring settings or approval requests.
 - [x] CTAP2 requests with `uv=true` continue through the local approval flow instead of failing with `UnsupportedOption`.
 - [x] CTAP2 getInfo advertises `credProps` and makeCredential returns the `credProps` extension when requested.
+- [x] CTAP2 makeCredential accepts the browser attestation conveyance preference shape.
 - [x] GTK control surface exposes a Unix-socket IPC seam and the daemon logs the matching socket path.
 - [x] `architecture.md` explains the browser, device, daemon, GTK, and IPC interactions.
 - [x] `security.md` captures the current threat model, mitigations, and future work.

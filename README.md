@@ -41,6 +41,7 @@ Useful flags:
 - Sign counter persistence.
 - GTK approval/settings prototype with TOML-backed preferences.
 - Browser request compatibility for `credProps` and `residentKey` shapes.
+- Browser attestation conveyance preferences are accepted and ignored.
 
 ## Future Work
 

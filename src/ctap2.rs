@@ -146,6 +146,7 @@ impl Authenticator {
         let params = map_array(&request, 4).ok_or(ErrorStatus::MissingParameter)?;
         let cred_props_requested = map_map(&request, 6)
             .is_some_and(|extensions| map_bool(extensions, "credProps") == Some(true));
+        validate_attestation_conveyance(map_text(&request, 8))?;
 
         if !params.iter().any(supports_es256) {
             return Err(ErrorStatus::UnsupportedAlgorithm);
@@ -746,6 +747,20 @@ fn validate_resident_key_options(options: Option<&[(Value, Value)]>) -> Result<(
     Ok(())
 }
 
+fn validate_attestation_conveyance(attestation: Option<&str>) -> Result<(), ErrorStatus> {
+    let Some(attestation) = attestation else {
+        return Ok(());
+    };
+
+    match attestation {
+        "none" | "indirect" | "direct" | "enterprise" => {
+            log::info!("request sets attestation={attestation}");
+            Ok(())
+        }
+        _ => Err(ErrorStatus::InvalidCbor),
+    }
+}
+
 fn excluded_credential_exists(
     credentials: &[Credential],
     rp_id: &str,
@@ -1130,6 +1145,19 @@ mod tests {
                 "residentKey",
                 "surprise"
             )]))),
+            Err(ErrorStatus::InvalidCbor)
+        );
+    }
+
+    #[test]
+    fn attestation_conveyance_accepts_common_browser_values() {
+        assert_eq!(validate_attestation_conveyance(None), Ok(()));
+        assert_eq!(validate_attestation_conveyance(Some("none")), Ok(()));
+        assert_eq!(validate_attestation_conveyance(Some("indirect")), Ok(()));
+        assert_eq!(validate_attestation_conveyance(Some("direct")), Ok(()));
+        assert_eq!(validate_attestation_conveyance(Some("enterprise")), Ok(()));
+        assert_eq!(
+            validate_attestation_conveyance(Some("unexpected")),
             Err(ErrorStatus::InvalidCbor)
         );
     }

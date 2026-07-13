@@ -8,6 +8,7 @@
 - Never overwrite an existing migration SQL file. Only add new migration files.
 - CTAP2 credential storage records a `user_id` and the daemon prefers `SUDO_UID` when running under sudo so credentials can be scoped to the connected user.
 - CTAP2 request handling accepts `credProps` and `residentKey` browser request shapes.
+- CTAP2 makeCredential also accepts the attestation conveyance preference shape.
 
 ## Project Direction
 
