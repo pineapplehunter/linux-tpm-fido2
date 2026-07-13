@@ -5,7 +5,10 @@ use std::{
     str::FromStr,
 };
 
-use color_eyre::{Result, eyre::WrapErr};
+use color_eyre::{
+    Result,
+    eyre::{WrapErr, eyre},
+};
 use sqlx::{
     Row, SqlitePool,
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
@@ -60,6 +63,18 @@ pub fn save_ctap2_credentials_to_dir(
     credentials: &[StoredCtap2Credential],
 ) -> Result<()> {
     block_on_store(save_ctap2_credentials_async(dir.as_ref(), credentials))
+}
+
+pub fn update_ctap2_sign_count_in_dir(
+    dir: impl AsRef<Path>,
+    credential_id: &[u8],
+    sign_count: u32,
+) -> Result<()> {
+    block_on_store(update_ctap2_sign_count_async(
+        dir.as_ref(),
+        credential_id,
+        sign_count,
+    ))
 }
 
 pub fn credentials_database_path_in_dir(dir: impl AsRef<Path>) -> PathBuf {
@@ -156,6 +171,34 @@ async fn save_ctap2_credentials_async(
     tx.commit()
         .await
         .wrap_err("committing credential store transaction")
+}
+
+async fn update_ctap2_sign_count_async(
+    dir: &Path,
+    credential_id: &[u8],
+    sign_count: u32,
+) -> Result<()> {
+    let pool = open_database(dir).await?;
+    let result = sqlx::query(
+        "UPDATE credentials \
+         SET sign_count = ?1, updated_at = CURRENT_TIMESTAMP \
+         WHERE credential_id = ?2",
+    )
+    .bind(i64::from(sign_count))
+    .bind(credential_id)
+    .execute(&pool)
+    .await
+    .wrap_err("updating CTAP2 credential sign_count")?;
+
+    if result.rows_affected() != 1 {
+        return Err(eyre!(
+            "updated {} rows while updating sign_count for credential ID length {}; expected 1",
+            result.rows_affected(),
+            credential_id.len()
+        ));
+    }
+
+    Ok(())
 }
 
 async fn open_database(dir: &Path) -> Result<SqlitePool> {
@@ -277,6 +320,61 @@ mod tests {
 
         assert_eq!(loaded, vec![second]);
         fs::remove_dir_all(&dir).expect("remove test store");
+    }
+
+    #[test]
+    fn sign_count_update_changes_one_credential() {
+        let dir = test_store_dir("update-sign-count");
+        let first = test_credential(vec![1], "first.example", 1);
+        let second = test_credential(vec![2], "second.example", 2);
+        save_ctap2_credentials_to_dir(&dir, &[first.clone(), second.clone()])
+            .expect("save credentials");
+
+        update_ctap2_sign_count_in_dir(&dir, &first.id, 42).expect("update sign count");
+
+        let loaded = load_ctap2_credentials_from_dir(&dir).expect("load credentials");
+        let loaded_first = loaded
+            .iter()
+            .find(|credential| credential.id == first.id)
+            .expect("first credential");
+        let loaded_second = loaded
+            .iter()
+            .find(|credential| credential.id == second.id)
+            .expect("second credential");
+
+        assert_eq!(loaded_first.sign_count, 42);
+        assert_eq!(loaded_second.sign_count, 2);
+        fs::remove_dir_all(&dir).expect("remove test store");
+    }
+
+    #[test]
+    fn sign_count_update_rejects_unknown_credential() {
+        let dir = test_store_dir("update-missing-sign-count");
+        save_ctap2_credentials_to_dir(&dir, &[test_credential(vec![1], "example.com", 1)])
+            .expect("save credentials");
+
+        let error =
+            update_ctap2_sign_count_in_dir(&dir, &[9], 42).expect_err("reject missing credential");
+
+        assert!(error.to_string().contains("updated 0 rows"));
+        fs::remove_dir_all(&dir).expect("remove test store");
+    }
+
+    fn test_credential(id: Vec<u8>, rp_id: &str, sign_count: u32) -> StoredCtap2Credential {
+        StoredCtap2Credential {
+            id,
+            rp_id: rp_id.to_owned(),
+            user_handle: vec![1, 2, 3, 4],
+            user_name: None,
+            user_display_name: None,
+            key: StoredTpmKey {
+                private: vec![5],
+                public: vec![6],
+                public_key_x: vec![7; 32],
+                public_key_y: vec![8; 32],
+            },
+            sign_count,
+        }
     }
 
     fn test_store_dir(name: &str) -> PathBuf {
