@@ -60,7 +60,7 @@
 - [x] Add credential user_id storage and filter CTAP2 lookup by the active user.
 - [x] Prototype GNOME-style approval popup for register/auth flows.
 - [x] Define and enforce IPC authentication for the GTK control socket.
-- [ ] Expand CTAP2 compatibility for additional browser request shapes.
+- [x] Expand CTAP2 compatibility for additional browser request shapes.
 
 ## Next
 

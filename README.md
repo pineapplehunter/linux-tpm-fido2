@@ -40,6 +40,7 @@ Useful flags:
 - Recovery slots stored separately from the primary credential metadata.
 - Sign counter persistence.
 - GTK approval/settings prototype with TOML-backed preferences.
+- Browser request compatibility for `credProps` and `residentKey` shapes.
 
 ## Future Work
 

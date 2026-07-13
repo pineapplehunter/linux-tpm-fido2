@@ -675,6 +675,7 @@ fn validate_make_credential_options(options: Option<&[(Value, Value)]>) -> Resul
     validate_common_options(options, true)?;
     // Discoverable credentials are acceptable because credentials are stored locally.
     let _rk = options.and_then(|options| map_bool(options, "rk"));
+    validate_resident_key_options(options)?;
     Ok(())
 }
 
@@ -718,6 +719,27 @@ fn validate_common_options(
         if reject_user_presence_false {
             log::info!("request disables user presence, which is not supported");
             return Err(ErrorStatus::UnsupportedOption);
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_resident_key_options(options: Option<&[(Value, Value)]>) -> Result<(), ErrorStatus> {
+    let Some(options) = options else {
+        return Ok(());
+    };
+
+    if let Some(require_resident_key) = map_bool(options, "requireResidentKey") {
+        log::info!("request sets requireResidentKey={require_resident_key}");
+    }
+
+    if let Some(resident_key) = map_text(options, "residentKey") {
+        match resident_key {
+            "discouraged" | "preferred" | "required" => {
+                log::info!("request sets residentKey={resident_key}");
+            }
+            _ => return Err(ErrorStatus::InvalidCbor),
         }
     }
 
@@ -1085,6 +1107,31 @@ mod tests {
             validate_make_credential_options(Some(&options_map(&[("rk", false)]))),
             Ok(())
         );
+        assert_eq!(
+            validate_make_credential_options(Some(&options_map(&[("requireResidentKey", true)]))),
+            Ok(())
+        );
+        assert_eq!(
+            validate_make_credential_options(Some(&options_text_map(&[(
+                "residentKey",
+                "required"
+            )]))),
+            Ok(())
+        );
+        assert_eq!(
+            validate_make_credential_options(Some(&options_text_map(&[(
+                "residentKey",
+                "preferred"
+            )]))),
+            Ok(())
+        );
+        assert_eq!(
+            validate_make_credential_options(Some(&options_text_map(&[(
+                "residentKey",
+                "surprise"
+            )]))),
+            Err(ErrorStatus::InvalidCbor)
+        );
     }
 
     #[test]
@@ -1429,6 +1476,18 @@ mod tests {
         options
             .iter()
             .map(|(key, value)| (Value::Text((*key).to_owned()), Value::Bool(*value)))
+            .collect()
+    }
+
+    fn options_text_map(options: &[(&str, &str)]) -> Vec<(Value, Value)> {
+        options
+            .iter()
+            .map(|(key, value)| {
+                (
+                    Value::Text((*key).to_owned()),
+                    Value::Text((*value).to_owned()),
+                )
+            })
             .collect()
     }
 }

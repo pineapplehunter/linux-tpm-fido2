@@ -7,6 +7,7 @@
 - TPM signing, credential registration/assertion, persistent credential storage, and recovery-slot generation are implemented; GUI is not fully implemented yet.
 - Never overwrite an existing migration SQL file. Only add new migration files.
 - CTAP2 credential storage records a `user_id` and the daemon prefers `SUDO_UID` when running under sudo so credentials can be scoped to the connected user.
+- CTAP2 request handling accepts `credProps` and `residentKey` browser request shapes.
 
 ## Project Direction
 
