@@ -11,6 +11,7 @@ color-eyre = "0.6.5"
 env_logger = "0.11.8"
 getrandom = "0.4.3"
 gtk4 = "0.11.4"
+libadwaita = "0.9.2"
 log = "0.4.27"
 p256 = { version = "0.14", features = ["ecdsa"] }
 rcgen = { version = "0.14.8", features = ["ring"] }

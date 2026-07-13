@@ -49,6 +49,7 @@
             ];
 
             buildInputs = with pkgs; [
+              libadwaita
               gtk4
               tpm2-tss
             ];
@@ -133,6 +134,7 @@
             env.SQLX_OFFLINE = "true";
 
             packages = with pkgs; [
+              libadwaita
               gtk4
               pkg-config
               rustPlatform.bindgenHook

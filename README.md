@@ -1,55 +1,56 @@
 # linux-tpm-fido2
 
-`linux-tpm-fido2` is an experimental Linux daemon for providing a FIDO2/WebAuthn passkey authenticator backed by a TPM 2.0.
+`linux-tpm-fido2` is an experimental Linux TPM-backed FIDO2/WebAuthn authenticator.
 
-The goal is to let browsers use TPM-protected credentials through the normal FIDO2 authenticator path while keeping user approval and credential management local to the desktop.
+It exposes a browser-usable virtual HID authenticator, stores credentials in SQLite, and uses the TPM for signing and recovery material.
 
-## Goals
+## What It Does
 
-- Expose a browser-usable FIDO2 authenticator backed by TPM 2.0 keys.
-- Support credentials bound to TPM PCR policy, starting with secure boot state and allowing additional PCR selections later.
-- Support passphrase-based recovery for credentials using TPM-bound material that is not PCR-bound.
-- Route approval prompts through the active graphical session while the daemon remains a single system service.
-- Show a GTK approval prompt for authentication requests with accept/reject actions.
-- Provide a GTK settings UI for stored passkey IDs and recovery passphrase configuration.
-- Store credential metadata using a LUKS2-inspired design: structured metadata, keyslots, tokens, and clear separation between encrypted secrets and unlock mechanisms.
+- Presents a virtual FIDO2 HID authenticator to browsers.
+- Creates TPM-backed P-256 credentials for registration and assertion.
+- Supports secure-boot PCR-bound credentials.
+- Supports recovery material unlocked by a passphrase and kept TPM-bound.
+- Exposes a GTK4 control surface for approval and settings.
+- Uses a Unix-socket IPC seam between the daemon and the GTK control surface.
 
-## Initial Architecture Sketch
+## Usage
 
-- A system or user daemon presents a virtual FIDO2 HID authenticator to browsers.
-- The daemon implements CTAP2/WebAuthn authenticator operations and delegates credential signing or unsealing to TPM 2.0.
-- A local GTK agent handles user presence/user verification prompts and settings.
-- Metadata stores public credential data, TPM public/private blobs, PCR policy description, recovery slots, and UI-facing labels.
-- The current daemon model is a system daemon that records the active session identity at startup and uses it to scope approval prompts.
-
-## Development
-
-Enter the development shell with:
+Daemon:
 
 ```sh
-nix develop
+linux-tpm-fido2 --store-dir .linux-tpm-fido2-store --tpm-path /dev/tpmrm0 --uhid-path /dev/uhid
 ```
 
-Useful commands:
+GTK control surface:
 
 ```sh
-nix develop -c cargo fmt
-nix develop -c cargo check
-nix develop -c cargo test
-nix fmt
-nix develop -c cargo run -- --dry-run
+linux-tpm-fido2-ui --store-dir .linux-tpm-fido2-store
 ```
 
-Logging uses the `log` crate with `env_logger`; default level is `info`. Use `RUST_LOG=debug nix develop -c cargo run -- ...` for lower-level UHID diagnostics.
+Useful flags:
 
-The daemon currently accepts `--uhid-path`, `--tpm-path`, `--store-dir`, and `--dry-run`. Defaults are `/dev/uhid`, `/dev/tpmrm0`, and `.linux-tpm-fido2-store`. A real run will usually need `sudo` or udev permissions that allow access to the UHID and TPM device nodes.
+- `--dry-run` on the daemon prints the resolved configuration without opening devices.
+- `--store-dir` selects the SQLite store and UI settings directory.
 
-There is also a standalone GTK4 control surface in `src/bin/linux-tpm-fido2-ui.rs` that shows an approval pane and a settings pane backed by the SQLite credential store and a `ui-settings.toml` file in the store directory. It also serves a Unix-socket IPC endpoint at `control.sock` in the store directory.
+## Features
 
-`nix fmt` uses treefmt-nix to run `nixfmt`, `rustfmt`, and `taplo` from the flake.
+- CTAPHID framing for `INIT`, `PING`, `CBOR`, `WINK`, `CANCEL`, and `ERROR`.
+- CTAP2 `authenticatorGetInfo`, `authenticatorMakeCredential`, and `authenticatorGetAssertion`.
+- TPM-backed signing keys and PCR policy bindings.
+- Recovery slots stored separately from the primary credential metadata.
+- Sign counter persistence.
+- GTK approval/settings prototype with TOML-backed preferences.
 
-## Current Status
+## Future Work
 
-The daemon can create a UHID-backed FIDO HID device, handle CTAPHID `INIT`, `PING`, `CBOR`, `WINK`, and `CANCEL`, and implement CTAP2 `authenticatorGetInfo`, `authenticatorMakeCredential`, and `authenticatorGetAssertion`.
+- Finish wiring the GTK control surface into daemon-side approval IPC.
+- Expand CTAP2 compatibility for additional browser request shapes.
+- Harden the storage model toward production metadata and unlock mechanisms.
+- Decide on the long-term daemon/session model before expanding the UI.
+- Add a production threat model and security review before broad use.
 
-CTAP2 credentials are TPM-backed P-256 ECDSA keys persisted in a normalized SQLite store with separate metadata, keyslot, and token tables managed by `sqlx` migrations. Secure-boot PCR binding is wired for credential creation and assertion; recovery slots can now be generated during registration with `LINUX_TPM_FIDO2_RECOVERY_PASSPHRASE`, approval prompts are scoped to the active graphical session, and the GTK control surface now persists its own TOML settings file plus a Unix-socket IPC endpoint while production metadata durability remains pending.
+## Current Limits
+
+- Experimental only.
+- No FIDO certification claims.
+- No production security claims for the development store.

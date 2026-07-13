@@ -44,17 +44,17 @@
 - [x] GTK approval and settings UI prototype exists as a standalone GTK4 control surface.
 - [x] CTAP2 requests with `uv=true` continue through the local approval flow instead of failing with `UnsupportedOption`.
 - [x] GTK control surface exposes a Unix-socket IPC seam and the daemon logs the matching socket path.
+- [x] `architecture.md` explains the browser, device, daemon, GTK, and IPC interactions.
+- [x] `security.md` captures the current threat model, mitigations, and future work.
+- [x] CTAP2 requests with `up=false` are rejected instead of silently continuing.
+- [x] README focuses on project purpose, usage, features, and future work.
+- [x] GTK app now uses libadwaita application and window types.
 
 ## In Progress
 
 ## Next
 
-- [ ] Use libadwaita for gtk app
-- [ ] Explain the architecture of the program in architecture.md . Show the interactions with the browser, device, daemon and the gtk app.
-- [ ] Perform a security audit. create a security.md with the threat model contents. If the threat model is not clear write what you know and Add this task to future work.
-- [ ] Improve CTAP2 request handling for browser edge cases.
 - [ ] Add GTK approval and settings UI after transport, TPM, and storage are stable.
-- [ ] Update README. Remove development information. Create a new one from scratch. Add the project intension, how to use it, list of features, future works.
 
 ## Architecture Direction
 

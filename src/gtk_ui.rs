@@ -6,9 +6,11 @@ use std::{
 
 use color_eyre::{Result, eyre::WrapErr};
 use gtk4::{
-    Application, ApplicationWindow, Box as GtkBox, Button, Entry, Label, ListBox, ListBoxRow,
-    Notebook, Orientation, ScrolledWindow, prelude::*,
+    Box as GtkBox, Button, Entry, Label, ListBox, ListBoxRow, Notebook, Orientation,
+    ScrolledWindow, prelude::*,
 };
+use libadwaita as adw;
+use libadwaita::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::{ipc, session, store};
@@ -56,7 +58,7 @@ pub fn launch(config: GtkUiConfig) -> Result<()> {
     let session = session::SessionContext::detect();
     let socket_path = ipc::start_control_socket_server(&config.store_dir, settings_state.clone())?;
     log::info!("GTK IPC socket: {}", socket_path.display());
-    let app = Application::builder()
+    let app = adw::Application::builder()
         .application_id("org.linux_tpm_fido2.control")
         .build();
 
@@ -121,7 +123,7 @@ pub fn save_ui_settings_to_dir(dir: impl AsRef<Path>, settings: &UiSettings) -> 
 }
 
 fn build_ui(
-    app: &Application,
+    app: &adw::Application,
     session: &session::SessionContext,
     store_dir: &Path,
     credentials: &[CredentialSummary],
@@ -129,7 +131,7 @@ fn build_ui(
     settings_state: Arc<Mutex<UiSettings>>,
     socket_path: &Path,
 ) {
-    let window = ApplicationWindow::builder()
+    let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("linux-tpm-fido2")
         .default_width(760)
@@ -154,7 +156,7 @@ fn build_ui(
     let settings_label = Label::new(Some("Settings"));
     notebook.append_page(&settings_page, Some(&settings_label));
 
-    window.set_child(Some(&notebook));
+    window.set_content(Some(&notebook));
     window.present();
 }
 

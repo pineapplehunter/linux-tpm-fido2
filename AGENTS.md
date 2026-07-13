@@ -13,7 +13,7 @@
 - Secure-boot PCR binding is wired into the current credential create/assert flow; configurable PCR selections still need follow-up work.
 - Recovery uses passphrase-unlocked material that remains TPM-bound but is not PCR-bound; the current path is env-controlled until GTK settings exist.
 - The daemon model is a single system daemon that records active session identity at startup and uses it to scope approval prompts.
-- Planned UI is GTK: a standalone approval/settings control surface exists, persists TOML preferences in the store directory, and serves a Unix-socket IPC seam that the daemon-side GTK integration can wire into later.
+- Planned UI is GTK/libadwaita: a standalone approval/settings control surface exists, persists TOML preferences in the store directory, and serves a Unix-socket IPC seam that the daemon-side GTK integration can wire into later.
 - Credential storage now uses normalized metadata, keyslot, and token tables as a LUKS2-style step toward structured unlock mechanisms and separated secrets.
 
 ## Nix Workflow
