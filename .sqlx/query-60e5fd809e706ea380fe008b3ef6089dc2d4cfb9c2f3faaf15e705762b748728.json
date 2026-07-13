@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO tpm_keys (credential_id, tpm_private, tpm_public, public_key_x, public_key_y) VALUES (?1, ?2, ?3, ?4, ?5)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "60e5fd809e706ea380fe008b3ef6089dc2d4cfb9c2f3faaf15e705762b748728"
+}

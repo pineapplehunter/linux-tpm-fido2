@@ -29,6 +29,8 @@
           };
 
           devShells.default = pkgs.mkShell {
+            env.SQLX_OFFLINE = "true";
+
             packages = with pkgs; [
               pkg-config
               rustPlatform.bindgenHook

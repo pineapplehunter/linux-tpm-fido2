@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO credentials (credential_id, rp_id, user_handle, user_name, user_display_name, sign_count, policy_selection, policy_digest, recovery_label, recovery_passphrase_salt, recovery_passphrase_hash, recovery_tpm_private, recovery_tpm_public, recovery_public_key_x, recovery_public_key_y) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 15
+    },
+    "nullable": []
+  },
+  "hash": "c3e4ad4d82080b5ca09ca0726d44cc01ea19e2c93143e76de8af89a832c78c49"
+}

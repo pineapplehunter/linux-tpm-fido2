@@ -1,0 +1,9 @@
+ALTER TABLE credentials ADD COLUMN policy_selection TEXT;
+ALTER TABLE credentials ADD COLUMN policy_digest BLOB;
+ALTER TABLE credentials ADD COLUMN recovery_label TEXT;
+ALTER TABLE credentials ADD COLUMN recovery_passphrase_salt BLOB;
+ALTER TABLE credentials ADD COLUMN recovery_passphrase_hash BLOB;
+ALTER TABLE credentials ADD COLUMN recovery_tpm_private BLOB;
+ALTER TABLE credentials ADD COLUMN recovery_tpm_public BLOB;
+ALTER TABLE credentials ADD COLUMN recovery_public_key_x BLOB;
+ALTER TABLE credentials ADD COLUMN recovery_public_key_y BLOB;
