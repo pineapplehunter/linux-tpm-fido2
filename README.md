@@ -1,0 +1,46 @@
+# linux-tpm-fido2
+
+`linux-tpm-fido2` is an experimental Linux daemon for providing a FIDO2/WebAuthn passkey authenticator backed by a TPM 2.0.
+
+The goal is to let browsers use TPM-protected credentials through the normal FIDO2 authenticator path while keeping user approval and credential management local to the desktop.
+
+## Goals
+
+- Expose a browser-usable FIDO2 authenticator backed by TPM 2.0 keys.
+- Support credentials bound to TPM PCR policy, starting with secure boot state and allowing additional PCR selections later.
+- Support passphrase-based recovery for credentials using TPM-bound material that is not PCR-bound.
+- Show a GTK approval prompt for authentication requests with accept/reject actions.
+- Provide a GTK settings UI for stored passkey IDs and recovery passphrase configuration.
+- Store credential metadata using a LUKS2-inspired design: structured metadata, keyslots, tokens, and clear separation between encrypted secrets and unlock mechanisms.
+
+## Initial Architecture Sketch
+
+- A system or user daemon presents a virtual FIDO2 HID authenticator to browsers.
+- The daemon implements CTAP2/WebAuthn authenticator operations and delegates credential signing or unsealing to TPM 2.0.
+- A local GTK agent handles user presence/user verification prompts and settings.
+- Metadata stores public credential data, TPM public/private blobs, PCR policy description, recovery slots, and UI-facing labels.
+
+## Development
+
+Enter the development shell with:
+
+```sh
+nix develop
+```
+
+Useful commands:
+
+```sh
+cargo fmt
+cargo check
+cargo test
+cargo run -- --dry-run
+```
+
+Logging uses the `log` crate with `env_logger`; default level is `info`. Use `RUST_LOG=debug cargo run -- ...` for lower-level UHID diagnostics.
+
+The daemon currently accepts `--uhid-path` and `--tpm-path`; defaults are `/dev/uhid` and `/dev/tpmrm0`. A real run will usually need `sudo` or udev permissions that allow access to those device nodes.
+
+## Current Status
+
+The first Rust skeleton exists. It can create a UHID-backed FIDO HID device and contains initial CTAPHID handling for `INIT`, `PING`, and `CBOR` with a minimal CTAP2 `authenticatorGetInfo` response. TPM signing, credential storage, registration, assertion, recovery, and GUI are not implemented yet.

@@ -1,0 +1,394 @@
+use ciborium::value::Value;
+use p256::ecdsa::{Signature, SigningKey, signature::Signer};
+use rand_core::{OsRng, RngCore};
+use sha2::{Digest, Sha256};
+
+pub const CMD_AUTHENTICATOR_MAKE_CREDENTIAL: u8 = 0x01;
+pub const CMD_AUTHENTICATOR_GET_ASSERTION: u8 = 0x02;
+pub const CMD_AUTHENTICATOR_GET_INFO: u8 = 0x04;
+
+const CTAP2_OK: u8 = 0x00;
+const CTAP1_ERR_INVALID_COMMAND: u8 = 0x01;
+const CTAP2_ERR_INVALID_CBOR: u8 = 0x12;
+const CTAP2_ERR_MISSING_PARAMETER: u8 = 0x14;
+const CTAP2_ERR_UNSUPPORTED_ALGORITHM: u8 = 0x26;
+const CTAP2_ERR_NO_CREDENTIALS: u8 = 0x2e;
+
+const COSE_ALG_ES256: i64 = -7;
+pub const AAGUID: [u8; 16] = [
+    0x6c, 0x74, 0x70, 0x6d, 0xf1, 0xd0, 0x42, 0x00, 0x80, 0x01, 0x54, 0x50, 0x4d, 0x46, 0x49, 0x44,
+];
+
+#[derive(Default)]
+pub struct Authenticator {
+    credentials: Vec<Credential>,
+}
+
+struct Credential {
+    id: Vec<u8>,
+    rp_id: String,
+    user_handle: Vec<u8>,
+    user_name: Option<String>,
+    user_display_name: Option<String>,
+    signing_key: SigningKey,
+    sign_count: u32,
+}
+
+impl Authenticator {
+    pub fn handle_cbor(&mut self, payload: &[u8]) -> Vec<u8> {
+        let Some((&command, body)) = payload.split_first() else {
+            return vec![CTAP1_ERR_INVALID_COMMAND];
+        };
+
+        log::info!("ctap2 command: {}", command_name(command));
+
+        match command {
+            CMD_AUTHENTICATOR_GET_INFO => get_info_response(),
+            CMD_AUTHENTICATOR_MAKE_CREDENTIAL => self.make_credential(body),
+            CMD_AUTHENTICATOR_GET_ASSERTION => self.get_assertion(body),
+            _ => vec![CTAP1_ERR_INVALID_COMMAND],
+        }
+    }
+
+    fn make_credential(&mut self, body: &[u8]) -> Vec<u8> {
+        let request = match decode_map(body) {
+            Ok(request) => request,
+            Err(status) => return vec![status],
+        };
+
+        let Some(rp) = map_map(&request, 2) else {
+            return vec![CTAP2_ERR_MISSING_PARAMETER];
+        };
+        let Some(user) = map_map(&request, 3) else {
+            return vec![CTAP2_ERR_MISSING_PARAMETER];
+        };
+        let Some(params) = map_array(&request, 4) else {
+            return vec![CTAP2_ERR_MISSING_PARAMETER];
+        };
+
+        if map_bytes(&request, 1).is_none() {
+            return vec![CTAP2_ERR_MISSING_PARAMETER];
+        }
+        if !params.iter().any(supports_es256) {
+            return vec![CTAP2_ERR_UNSUPPORTED_ALGORITHM];
+        }
+
+        let Some(rp_id) = map_text(rp, "id") else {
+            return vec![CTAP2_ERR_MISSING_PARAMETER];
+        };
+        let Some(user_handle) = map_bytes(user, "id") else {
+            return vec![CTAP2_ERR_MISSING_PARAMETER];
+        };
+
+        let signing_key = SigningKey::random(&mut OsRng);
+        let public_key = cose_public_key(&signing_key);
+        let mut credential_id = vec![0u8; 32];
+        OsRng.fill_bytes(&mut credential_id);
+
+        let auth_data = make_auth_data(rp_id, 0x41, 0, Some((&credential_id, &public_key)));
+        self.credentials.push(Credential {
+            id: credential_id,
+            rp_id: rp_id.to_owned(),
+            user_handle: user_handle.to_vec(),
+            user_name: map_text(user, "name").map(str::to_owned),
+            user_display_name: map_text(user, "displayName").map(str::to_owned),
+            signing_key,
+            sign_count: 0,
+        });
+
+        log::info!(
+            "created software credential rp_id={} total_credentials={}",
+            rp_id,
+            self.credentials.len()
+        );
+
+        encode_response(Value::Map(vec![
+            (Value::Integer(1.into()), Value::Text("none".to_owned())),
+            (Value::Integer(2.into()), Value::Bytes(auth_data)),
+            (Value::Integer(3.into()), Value::Map(Vec::new())),
+        ]))
+    }
+
+    fn get_assertion(&mut self, body: &[u8]) -> Vec<u8> {
+        let request = match decode_map(body) {
+            Ok(request) => request,
+            Err(status) => return vec![status],
+        };
+
+        let Some(rp_id) = map_text(&request, 1) else {
+            return vec![CTAP2_ERR_MISSING_PARAMETER];
+        };
+        let Some(client_data_hash) = map_bytes(&request, 2) else {
+            return vec![CTAP2_ERR_MISSING_PARAMETER];
+        };
+        let allow_list = map_array(&request, 3);
+
+        let Some(credential) = self.credentials.iter_mut().find(|credential| {
+            credential.rp_id == rp_id && allow_list_matches(allow_list, &credential.id)
+        }) else {
+            return vec![CTAP2_ERR_NO_CREDENTIALS];
+        };
+
+        credential.sign_count = credential.sign_count.saturating_add(1);
+        let auth_data = make_auth_data(&credential.rp_id, 0x01, credential.sign_count, None);
+        let mut signed_data = auth_data.clone();
+        signed_data.extend_from_slice(client_data_hash);
+        let signature: Signature = credential.signing_key.sign(&signed_data);
+
+        let mut user = vec![(
+            Value::Text("id".to_owned()),
+            Value::Bytes(credential.user_handle.clone()),
+        )];
+        if let Some(name) = &credential.user_name {
+            user.push((Value::Text("name".to_owned()), Value::Text(name.clone())));
+        }
+        if let Some(display_name) = &credential.user_display_name {
+            user.push((
+                Value::Text("displayName".to_owned()),
+                Value::Text(display_name.clone()),
+            ));
+        }
+
+        log::info!(
+            "asserting software credential rp_id={} sign_count={}",
+            credential.rp_id,
+            credential.sign_count
+        );
+
+        encode_response(Value::Map(vec![
+            (
+                Value::Integer(1.into()),
+                Value::Map(vec![
+                    (
+                        Value::Text("type".to_owned()),
+                        Value::Text("public-key".to_owned()),
+                    ),
+                    (
+                        Value::Text("id".to_owned()),
+                        Value::Bytes(credential.id.clone()),
+                    ),
+                ]),
+            ),
+            (Value::Integer(2.into()), Value::Bytes(auth_data)),
+            (
+                Value::Integer(3.into()),
+                Value::Bytes(signature.to_der().as_bytes().to_vec()),
+            ),
+            (Value::Integer(4.into()), Value::Map(user)),
+        ]))
+    }
+}
+
+pub fn command_name(command: u8) -> &'static str {
+    match command {
+        CMD_AUTHENTICATOR_MAKE_CREDENTIAL => "authenticatorMakeCredential",
+        CMD_AUTHENTICATOR_GET_ASSERTION => "authenticatorGetAssertion",
+        CMD_AUTHENTICATOR_GET_INFO => "authenticatorGetInfo",
+        _ => "unknown",
+    }
+}
+
+fn get_info_response() -> Vec<u8> {
+    encode_response(Value::Map(vec![
+        (
+            Value::Integer(1.into()),
+            Value::Array(vec![
+                Value::Text("FIDO_2_1".to_owned()),
+                Value::Text("FIDO_2_0".to_owned()),
+            ]),
+        ),
+        (Value::Integer(3.into()), Value::Bytes(AAGUID.to_vec())),
+        (
+            Value::Integer(4.into()),
+            Value::Map(vec![
+                (Value::Text("plat".to_owned()), Value::Bool(false)),
+                (Value::Text("rk".to_owned()), Value::Bool(true)),
+                (Value::Text("up".to_owned()), Value::Bool(true)),
+                (Value::Text("uv".to_owned()), Value::Bool(false)),
+                (Value::Text("clientPin".to_owned()), Value::Bool(false)),
+            ]),
+        ),
+        (Value::Integer(5.into()), Value::Integer(1200.into())),
+        (
+            Value::Integer(9.into()),
+            Value::Array(vec![Value::Text("usb".to_owned())]),
+        ),
+        (
+            Value::Integer(10.into()),
+            Value::Array(vec![Value::Map(vec![
+                (
+                    Value::Text("type".to_owned()),
+                    Value::Text("public-key".to_owned()),
+                ),
+                (
+                    Value::Text("alg".to_owned()),
+                    Value::Integer(COSE_ALG_ES256.into()),
+                ),
+            ])]),
+        ),
+    ]))
+}
+
+fn decode_map(body: &[u8]) -> Result<Vec<(Value, Value)>, u8> {
+    match ciborium::from_reader::<Value, _>(body) {
+        Ok(Value::Map(map)) => Ok(map),
+        Ok(_) | Err(_) => Err(CTAP2_ERR_INVALID_CBOR),
+    }
+}
+
+trait MapKey {
+    fn matches(&self, value: &Value) -> bool;
+}
+
+impl MapKey for i128 {
+    fn matches(&self, value: &Value) -> bool {
+        value
+            .as_integer()
+            .and_then(|integer| i128::try_from(integer).ok())
+            == Some(*self)
+    }
+}
+
+impl MapKey for &str {
+    fn matches(&self, value: &Value) -> bool {
+        value.as_text() == Some(*self)
+    }
+}
+
+fn map_value<K: MapKey>(map: &[(Value, Value)], key: K) -> Option<&Value> {
+    map.iter()
+        .find_map(|(candidate, value)| key.matches(candidate).then_some(value))
+}
+
+fn map_bytes<K: MapKey>(map: &[(Value, Value)], key: K) -> Option<&[u8]> {
+    map_value(map, key)
+        .and_then(Value::as_bytes)
+        .map(Vec::as_slice)
+}
+
+fn map_text<K: MapKey>(map: &[(Value, Value)], key: K) -> Option<&str> {
+    map_value(map, key).and_then(Value::as_text)
+}
+
+fn map_array<K: MapKey>(map: &[(Value, Value)], key: K) -> Option<&[Value]> {
+    map_value(map, key)
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+}
+
+fn map_map<K: MapKey>(map: &[(Value, Value)], key: K) -> Option<&[(Value, Value)]> {
+    map_value(map, key)
+        .and_then(Value::as_map)
+        .map(Vec::as_slice)
+}
+
+fn supports_es256(value: &Value) -> bool {
+    let Value::Map(map) = value else {
+        return false;
+    };
+    map_text(map, "type") == Some("public-key")
+        && map_value(map, "alg")
+            .and_then(Value::as_integer)
+            .and_then(|integer| i64::try_from(integer).ok())
+            == Some(COSE_ALG_ES256)
+}
+
+fn allow_list_matches(allow_list: Option<&[Value]>, credential_id: &[u8]) -> bool {
+    let Some(allow_list) = allow_list else {
+        return true;
+    };
+
+    allow_list.iter().any(|entry| {
+        let Value::Map(map) = entry else {
+            return false;
+        };
+        map_text(map, "type") == Some("public-key") && map_bytes(map, "id") == Some(credential_id)
+    })
+}
+
+fn make_auth_data(
+    rp_id: &str,
+    flags: u8,
+    sign_count: u32,
+    attested_credential_data: Option<(&[u8], &Value)>,
+) -> Vec<u8> {
+    let mut auth_data = Vec::new();
+    auth_data.extend_from_slice(&Sha256::digest(rp_id.as_bytes()));
+    auth_data.push(flags);
+    auth_data.extend_from_slice(&sign_count.to_be_bytes());
+
+    if let Some((credential_id, public_key)) = attested_credential_data {
+        auth_data.extend_from_slice(&AAGUID);
+        auth_data.extend_from_slice(&(credential_id.len() as u16).to_be_bytes());
+        auth_data.extend_from_slice(credential_id);
+        ciborium::into_writer(public_key, &mut auth_data).expect("serializing static COSE key");
+    }
+
+    auth_data
+}
+
+fn cose_public_key(signing_key: &SigningKey) -> Value {
+    let encoded = signing_key.verifying_key().to_encoded_point(false);
+    let x = encoded.x().expect("P-256 x coordinate").to_vec();
+    let y = encoded.y().expect("P-256 y coordinate").to_vec();
+
+    Value::Map(vec![
+        (Value::Integer(1.into()), Value::Integer(2.into())),
+        (
+            Value::Integer(3.into()),
+            Value::Integer(COSE_ALG_ES256.into()),
+        ),
+        (Value::Integer((-1).into()), Value::Integer(1.into())),
+        (Value::Integer((-2).into()), Value::Bytes(x)),
+        (Value::Integer((-3).into()), Value::Bytes(y)),
+    ])
+}
+
+fn encode_response(response: Value) -> Vec<u8> {
+    let mut payload = vec![CTAP2_OK];
+    ciborium::into_writer(&response, &mut payload).expect("serializing CTAP2 response");
+    payload
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn get_info_starts_with_success() {
+        let response = Authenticator::default().handle_cbor(&[CMD_AUTHENTICATOR_GET_INFO]);
+        assert_eq!(response[0], CTAP2_OK);
+        assert!(response.len() > 1);
+    }
+
+    #[test]
+    fn get_info_uses_project_aaguid_and_algorithm_metadata() {
+        let response = Authenticator::default().handle_cbor(&[CMD_AUTHENTICATOR_GET_INFO]);
+        let Value::Map(map) = ciborium::from_reader::<Value, _>(&response[1..]).expect("CBOR")
+        else {
+            panic!("expected getInfo map");
+        };
+
+        assert_eq!(map_bytes(&map, 3), Some(AAGUID.as_slice()));
+        assert!(
+            map_value(&map, 9).is_some(),
+            "transports key should be present"
+        );
+        assert!(
+            map_value(&map, 10).is_some(),
+            "algorithms key should be present"
+        );
+        assert!(
+            map_value(&map, 6).is_none(),
+            "pinUvAuthProtocols should not contain algorithms"
+        );
+    }
+
+    #[test]
+    fn unknown_command_is_rejected() {
+        assert_eq!(
+            Authenticator::default().handle_cbor(&[0xff]),
+            vec![CTAP1_ERR_INVALID_COMMAND]
+        );
+    }
+}

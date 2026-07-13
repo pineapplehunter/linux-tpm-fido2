@@ -1,0 +1,8 @@
+/.direnv
+result*
+
+# rust
+/target
+
+# development credential store
+/.linux-tpm-fido2-store
