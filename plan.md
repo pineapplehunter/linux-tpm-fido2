@@ -13,6 +13,7 @@
 - Update README and AGENTS.md when a new feature gets implemented or the implementation changed from the original docs.
 - Use bullet points on tha plan.md to reduce git diff.
 - The user may add tasks in the list.
+- When switching to a new task put the task under "## In Progress" in the plan.md file.
 
 
 ## Completed
@@ -35,6 +36,7 @@
 - [x] SQLx offline metadata generated for compile-time query checking.
 - [x] Dev shell exports `SQLX_OFFLINE=true`.
 - [x] Holistic NixOS test boots a VM, starts the daemon, provisions a virtual TPM, completes register/assert, and verifies restart against the same SQLite store and TPM state.
+- [x] treefmt-nix is wired in for `nix fmt` with `nixfmt`, `rustfmt`, and `taplo`.
 
 ## In Progress
 
@@ -42,7 +44,6 @@
 
 ## Next
 
-- [ ] Add setup for a formatter using treefmt-nix. Search for docs and setup `nixfmt` for nix, `rustfmt` for rust and `taplo` for toml.
 - [ ] Add recovery slots using passphrase-unlocked TPM-bound material.
 - [ ] Evolve the SQLite schema toward LUKS2-style metadata, tokens, and keyslots.
 - [ ] Decide the daemon/user-session model before GTK work.

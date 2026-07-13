@@ -1,7 +1,7 @@
 use std::{env, path::PathBuf, thread, time::Duration};
 
 use clap::Parser;
-use color_eyre::{eyre::WrapErr, Result};
+use color_eyre::{Result, eyre::WrapErr};
 use linux_tpm_fido2::{ctaphid, hid, store, tpm};
 use uhid_virt::{OutputEvent, StreamError, UHIDDevice};
 

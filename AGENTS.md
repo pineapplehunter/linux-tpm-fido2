@@ -19,7 +19,7 @@
 
 - Enter the dev environment with `nix develop` or let direnv load it via `.envrc` (`use flake`).
 - The default dev shell provides `pkg-config`, `rustPlatform.bindgenHook`, stable Rust from `oxalica/rust-overlay`, `rust-src`, and `rust-analyzer`.
-- Format Nix files with `nix fmt`; `flake.nix` sets `formatter = pkgs.nixfmt-tree`.
+- Format the repo with `nix fmt`; treefmt-nix wires up `nixfmt`, `rustfmt`, and `taplo` through the flake.
 - Validate flake changes with `nix flake check` when possible; currently the flake defines a dev shell and formatter, not packages or checks.
 
 ## Rust Workflow

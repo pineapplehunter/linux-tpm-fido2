@@ -3,13 +3,14 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use color_eyre::{eyre::WrapErr, Result};
+use color_eyre::{Result, eyre::WrapErr};
 use sha2::{Digest as ShaDigest, Sha256};
 use tss_esapi::{
+    Context,
     attributes::ObjectAttributesBuilder,
     constants::{
-        tss::{TPM2_RH_NULL, TPM2_ST_HASHCHECK},
         SessionType,
+        tss::{TPM2_RH_NULL, TPM2_ST_HASHCHECK},
     },
     interface_types::{
         algorithm::{HashingAlgorithm, PublicAlgorithm},
@@ -28,7 +29,6 @@ use tss_esapi::{
     traits::{Marshall, UnMarshall},
     tss2_esys::TPMT_TK_HASHCHECK,
     utils::{self, PublicKey},
-    Context,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]

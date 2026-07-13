@@ -34,12 +34,15 @@ Useful commands:
 nix develop -c cargo fmt
 nix develop -c cargo check
 nix develop -c cargo test
+nix fmt
 nix develop -c cargo run -- --dry-run
 ```
 
 Logging uses the `log` crate with `env_logger`; default level is `info`. Use `RUST_LOG=debug nix develop -c cargo run -- ...` for lower-level UHID diagnostics.
 
 The daemon currently accepts `--uhid-path`, `--tpm-path`, `--store-dir`, and `--dry-run`. Defaults are `/dev/uhid`, `/dev/tpmrm0`, and `.linux-tpm-fido2-store`. A real run will usually need `sudo` or udev permissions that allow access to the UHID and TPM device nodes.
+
+`nix fmt` uses treefmt-nix to run `nixfmt`, `rustfmt`, and `taplo` from the flake.
 
 ## Current Status
 

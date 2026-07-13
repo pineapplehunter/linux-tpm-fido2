@@ -9,7 +9,10 @@ use color_eyre::{
     Result,
     eyre::{WrapErr, eyre},
 };
-use sqlx::{SqlitePool, sqlite::{SqliteConnectOptions, SqlitePoolOptions}};
+use sqlx::{
+    SqlitePool,
+    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+};
 
 pub const DEV_STORE_DIR: &str = ".linux-tpm-fido2-store";
 const CREDENTIALS_DATABASE_FILE: &str = "credentials.sqlite";

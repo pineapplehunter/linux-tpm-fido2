@@ -3,6 +3,10 @@
 
   inputs.nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-unstable";
   inputs.flake-parts.url = "github:hercules-ci/flake-parts";
+  inputs.treefmt-nix = {
+    url = "github:numtide/treefmt-nix";
+    inputs.nixpkgs.follows = "nixpkgs";
+  };
   inputs.rust-overlay = {
     url = "github:oxalica/rust-overlay?ref=stable";
     inputs.nixpkgs.follows = "nixpkgs";
@@ -11,6 +15,8 @@
   outputs =
     { flake-parts, ... }@inputs:
     flake-parts.lib.mkFlake { inherit inputs; } {
+      imports = [ inputs.treefmt-nix.flakeModule ];
+
       systems = [
         "aarch64-darwin"
         "aarch64-linux"
@@ -104,6 +110,16 @@
 
           checks.nixos = linux-tpm-fido2-nixos-test;
 
+          treefmt = {
+            projectRootFile = "flake.nix";
+
+            programs = {
+              nixfmt.enable = true;
+              rustfmt.enable = true;
+              taplo.enable = true;
+            };
+          };
+
           _module.args.pkgs = import inputs.nixpkgs {
             inherit system;
             overlays = [
@@ -129,9 +145,6 @@
               })
             ];
           };
-
-          # Use nixfmt for all nix files
-          formatter = pkgs.nixfmt-tree;
 
           # Uncomment to build any package with `nix build .#package`
           #legacyPackages = pkgs;
