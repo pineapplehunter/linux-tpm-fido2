@@ -42,6 +42,7 @@
 - [x] SQLite storage now uses normalized metadata, keyslot, and token tables for CTAP2 credentials.
 - [x] Daemon/user-session model is now explicit: a system daemon routes approvals against the active graphical session and logs session identity at startup.
 - [x] GTK approval and settings UI prototype exists as a standalone GTK4 control surface.
+- [x] GTK approval IPC now blocks on a user decision instead of auto-approving requests when the UI is running.
 - [x] CTAP2 requests with `uv=true` continue through the local approval flow instead of failing with `UnsupportedOption`.
 - [x] GTK control surface exposes a Unix-socket IPC seam and the daemon logs the matching socket path.
 - [x] `architecture.md` explains the browser, device, daemon, GTK, and IPC interactions.
@@ -54,7 +55,11 @@
 
 ## In Progress
 
+- [x] Add credential user_id storage and filter CTAP2 lookup by the active user.
+
 ## Next
+
+- [ ] Start next task in plan.md
 
 
 ## Architecture Direction

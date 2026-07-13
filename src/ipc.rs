@@ -3,7 +3,7 @@ use std::{
     io::{BufRead, BufReader, BufWriter, Write},
     os::unix::net::{UnixListener, UnixStream},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Condvar, Mutex},
     thread,
 };
 
@@ -18,6 +18,58 @@ pub const CONTROL_SOCKET_FILE: &str = "control.sock";
 pub struct ApprovalPrompt {
     pub session: SessionContext,
     pub prompt: String,
+}
+
+#[derive(Debug, Default)]
+struct ApprovalPromptStateInner {
+    pending_prompt: Option<ApprovalPrompt>,
+    decision: Option<bool>,
+}
+
+#[derive(Debug, Default)]
+pub struct ApprovalPromptState {
+    inner: Mutex<ApprovalPromptStateInner>,
+    condvar: Condvar,
+}
+
+impl ApprovalPromptState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn set_pending(&self, prompt: ApprovalPrompt) {
+        let mut inner = self.inner.lock().expect("approval state lock");
+        inner.pending_prompt = Some(prompt);
+        inner.decision = None;
+        self.condvar.notify_all();
+    }
+
+    pub fn snapshot(&self) -> Option<ApprovalPrompt> {
+        self.inner
+            .lock()
+            .expect("approval state lock")
+            .pending_prompt
+            .clone()
+    }
+
+    pub fn respond(&self, decision: bool) {
+        let mut inner = self.inner.lock().expect("approval state lock");
+        if inner.pending_prompt.is_some() {
+            inner.decision = Some(decision);
+            self.condvar.notify_all();
+        }
+    }
+
+    pub fn wait_for_decision(&self) -> bool {
+        let mut inner = self.inner.lock().expect("approval state lock");
+        while inner.decision.is_none() {
+            inner = self.condvar.wait(inner).expect("approval state wait");
+        }
+
+        let decision = inner.decision.take().expect("approval decision present");
+        inner.pending_prompt = None;
+        decision
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,6 +94,7 @@ pub fn control_socket_path_in_dir(dir: impl AsRef<Path>) -> PathBuf {
 pub fn start_control_socket_server(
     dir: impl AsRef<Path>,
     settings: Arc<Mutex<UiSettings>>,
+    approval_state: Option<Arc<ApprovalPromptState>>,
 ) -> Result<PathBuf> {
     let socket_path = control_socket_path_in_dir(dir.as_ref());
     if socket_path.exists() {
@@ -56,7 +109,9 @@ pub fn start_control_socket_server(
         for stream in listener.incoming() {
             match stream {
                 Ok(stream) => {
-                    if let Err(error) = handle_connection(stream, &settings) {
+                    if let Err(error) =
+                        handle_connection(stream, &settings, approval_state.as_ref())
+                    {
                         log::warn!(
                             "IPC connection on {} failed: {error:?}",
                             thread_socket.display()
@@ -101,7 +156,11 @@ pub fn send_request(socket_path: impl AsRef<Path>, request: &IpcRequest) -> Resu
     serde_json::from_str(response_json.trim_end()).wrap_err("deserializing IPC response")
 }
 
-fn handle_connection(stream: UnixStream, settings: &Arc<Mutex<UiSettings>>) -> Result<()> {
+fn handle_connection(
+    stream: UnixStream,
+    settings: &Arc<Mutex<UiSettings>>,
+    approval_state: Option<&Arc<ApprovalPromptState>>,
+) -> Result<()> {
     let mut reader = BufReader::new(stream.try_clone().wrap_err("cloning IPC reader stream")?);
     let mut request_json = String::new();
     reader
@@ -124,7 +183,12 @@ fn handle_connection(stream: UnixStream, settings: &Arc<Mutex<UiSettings>>) -> R
                 prompt.session.describe(),
                 prompt.prompt
             );
-            IpcResponse::ApprovalDecision(true)
+            if let Some(state) = approval_state {
+                state.set_pending(prompt);
+                IpcResponse::ApprovalDecision(state.wait_for_decision())
+            } else {
+                IpcResponse::ApprovalDecision(true)
+            }
         }
     };
 
@@ -174,7 +238,7 @@ mod tests {
 
         let settings = Arc::new(Mutex::new(UiSettings::default()));
         let socket_path =
-            start_control_socket_server(&dir, settings.clone()).expect("start server");
+            start_control_socket_server(&dir, settings.clone(), None).expect("start server");
 
         let response =
             super::send_request(&socket_path, &IpcRequest::GetUiSettings).expect("get settings");

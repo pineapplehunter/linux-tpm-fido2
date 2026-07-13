@@ -21,6 +21,7 @@ const CREDENTIALS_DATABASE_FILE: &str = "credentials.sqlite";
 pub struct StoredCtap2Credential {
     pub id: Vec<u8>,
     pub rp_id: String,
+    pub user_id: Option<u32>,
     pub user_handle: Vec<u8>,
     pub user_name: Option<String>,
     pub user_display_name: Option<String>,
@@ -61,13 +62,14 @@ pub fn credentials_database_path() -> PathBuf {
 }
 
 pub fn load_ctap2_credentials() -> Result<Vec<StoredCtap2Credential>> {
-    load_ctap2_credentials_from_dir(dev_store_dir())
+    load_ctap2_credentials_from_dir(dev_store_dir(), None)
 }
 
 pub fn load_ctap2_credentials_from_dir(
     dir: impl AsRef<Path>,
+    user_id: Option<u32>,
 ) -> Result<Vec<StoredCtap2Credential>> {
-    block_on_store(load_ctap2_credentials_async(dir.as_ref()))
+    block_on_store(load_ctap2_credentials_async(dir.as_ref(), user_id))
 }
 
 pub fn save_ctap2_credentials(credentials: &[StoredCtap2Credential]) -> Result<()> {
@@ -97,7 +99,10 @@ pub fn credentials_database_path_in_dir(dir: impl AsRef<Path>) -> PathBuf {
     dir.as_ref().join(CREDENTIALS_DATABASE_FILE)
 }
 
-async fn load_ctap2_credentials_async(dir: &Path) -> Result<Vec<StoredCtap2Credential>> {
+async fn load_ctap2_credentials_async(
+    dir: &Path,
+    user_id: Option<u32>,
+) -> Result<Vec<StoredCtap2Credential>> {
     let database_path = credentials_database_path_in_dir(dir);
     if !database_path.exists() {
         return Ok(Vec::new());
@@ -105,7 +110,7 @@ async fn load_ctap2_credentials_async(dir: &Path) -> Result<Vec<StoredCtap2Crede
 
     let pool = open_database(dir).await?;
     let rows = sqlx::query(
-        "SELECT m.credential_id, m.rp_id, m.user_handle, m.user_name, m.user_display_name, \
+        "SELECT m.credential_id, m.rp_id, m.user_id, m.user_handle, m.user_name, m.user_display_name, \
                 m.sign_count, \
                 p.policy_selection, p.policy_digest, \
                 p.tpm_private AS primary_tpm_private, p.tpm_public AS primary_tpm_public, \
@@ -120,8 +125,10 @@ async fn load_ctap2_credentials_async(dir: &Path) -> Result<Vec<StoredCtap2Crede
          LEFT JOIN credential_keyslots r \
            ON r.credential_id = m.credential_id AND r.slot_kind = 'recovery' \
          LEFT JOIN credential_tokens t ON t.keyslot_id = r.keyslot_id \
+         WHERE (?1 IS NULL OR m.user_id = ?1 OR m.user_id IS NULL) \
          ORDER BY m.rp_id, m.credential_id",
     )
+    .bind(user_id.map(i64::from))
     .fetch_all(&pool)
     .await
     .wrap_err_with(|| format!("loading credentials from {}", database_path.display()))?;
@@ -129,6 +136,7 @@ async fn load_ctap2_credentials_async(dir: &Path) -> Result<Vec<StoredCtap2Crede
     rows.into_iter()
         .map(|row| {
             let sign_count: i64 = row.try_get("sign_count")?;
+            let stored_user_id: Option<i64> = row.try_get("user_id")?;
             let policy_selection: Option<String> = row.try_get("policy_selection")?;
             let policy_digest: Option<Vec<u8>> = row.try_get("policy_digest")?;
             let recovery_label: Option<String> = row.try_get("recovery_label")?;
@@ -142,6 +150,14 @@ async fn load_ctap2_credentials_async(dir: &Path) -> Result<Vec<StoredCtap2Crede
             Ok(StoredCtap2Credential {
                 id: row.try_get("credential_id")?,
                 rp_id: row.try_get("rp_id")?,
+                user_id: match (stored_user_id, user_id) {
+                    (Some(value), _) => Some(
+                        u32::try_from(value)
+                            .wrap_err_with(|| format!("invalid user_id {}", value))?,
+                    ),
+                    (None, Some(uid)) => Some(uid),
+                    (None, None) => None,
+                },
                 user_handle: row.try_get("user_handle")?,
                 user_name: row.try_get("user_name")?,
                 user_display_name: row.try_get("user_display_name")?,
@@ -207,11 +223,12 @@ async fn save_ctap2_credentials_async(
     for credential in credentials {
         sqlx::query(
             "INSERT INTO credential_metadata \
-             (credential_id, rp_id, user_handle, user_name, user_display_name, sign_count) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+             (credential_id, rp_id, user_id, user_handle, user_name, user_display_name, sign_count) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         )
         .bind(&credential.id)
         .bind(&credential.rp_id)
+        .bind(credential.user_id.map(i64::from))
         .bind(&credential.user_handle)
         .bind(credential.user_name.as_deref())
         .bind(credential.user_display_name.as_deref())
@@ -347,7 +364,7 @@ mod tests {
     fn missing_store_loads_empty_credentials() {
         let dir = test_store_dir("missing");
 
-        let credentials = load_ctap2_credentials_from_dir(&dir).expect("load credentials");
+        let credentials = load_ctap2_credentials_from_dir(&dir, None).expect("load credentials");
 
         assert!(credentials.is_empty());
     }
@@ -358,6 +375,7 @@ mod tests {
         let credentials = vec![StoredCtap2Credential {
             id: vec![1, 2, 3, 4],
             rp_id: "example.com".to_owned(),
+            user_id: Some(1000),
             user_handle: vec![5, 6, 7, 8],
             user_name: Some("user".to_owned()),
             user_display_name: Some("Test User".to_owned()),
@@ -386,7 +404,7 @@ mod tests {
         }];
 
         save_ctap2_credentials_to_dir(&dir, &credentials).expect("save CTAP2 credentials");
-        let loaded = load_ctap2_credentials_from_dir(&dir).expect("load CTAP2 credentials");
+        let loaded = load_ctap2_credentials_from_dir(&dir, None).expect("load CTAP2 credentials");
 
         assert_eq!(loaded, credentials);
         assert!(credentials_database_path_in_dir(&dir).exists());
@@ -399,6 +417,7 @@ mod tests {
         let first = StoredCtap2Credential {
             id: vec![1],
             rp_id: "first.example".to_owned(),
+            user_id: Some(1000),
             user_handle: vec![1],
             user_name: None,
             user_display_name: None,
@@ -415,6 +434,7 @@ mod tests {
         let second = StoredCtap2Credential {
             id: vec![2],
             rp_id: "second.example".to_owned(),
+            user_id: Some(1000),
             user_handle: vec![2],
             user_name: None,
             user_display_name: None,
@@ -434,7 +454,7 @@ mod tests {
         save_ctap2_credentials_to_dir(&dir, std::slice::from_ref(&second))
             .expect("save remaining credential");
 
-        let loaded = load_ctap2_credentials_from_dir(&dir).expect("load credentials");
+        let loaded = load_ctap2_credentials_from_dir(&dir, None).expect("load credentials");
 
         assert_eq!(loaded, vec![second]);
         fs::remove_dir_all(&dir).expect("remove test store");
@@ -450,7 +470,7 @@ mod tests {
 
         update_ctap2_sign_count_in_dir(&dir, &first.id, 42).expect("update sign count");
 
-        let loaded = load_ctap2_credentials_from_dir(&dir).expect("load credentials");
+        let loaded = load_ctap2_credentials_from_dir(&dir, None).expect("load credentials");
         let loaded_first = loaded
             .iter()
             .find(|credential| credential.id == first.id)
@@ -482,6 +502,7 @@ mod tests {
         StoredCtap2Credential {
             id,
             rp_id: rp_id.to_owned(),
+            user_id: Some(1000),
             user_handle: vec![1, 2, 3, 4],
             user_name: None,
             user_display_name: None,

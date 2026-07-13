@@ -5,6 +5,7 @@ use std::{
 };
 
 use color_eyre::{Result, eyre::WrapErr};
+use gtk4::glib::{self, ControlFlow};
 use gtk4::{
     Box as GtkBox, Button, Entry, Label, ListBox, ListBoxRow, Notebook, Orientation,
     ScrolledWindow, prelude::*,
@@ -52,11 +53,16 @@ impl Default for GtkUiConfig {
 }
 
 pub fn launch(config: GtkUiConfig) -> Result<()> {
-    let credentials = load_credential_summaries(&config.store_dir)?;
+    let session = session::SessionContext::detect();
+    let credentials = load_credential_summaries(&config.store_dir, session.uid)?;
     let settings = load_ui_settings_from_dir(&config.store_dir)?;
     let settings_state = Arc::new(Mutex::new(settings.clone()));
-    let session = session::SessionContext::detect();
-    let socket_path = ipc::start_control_socket_server(&config.store_dir, settings_state.clone())?;
+    let approval_state = Arc::new(ipc::ApprovalPromptState::new());
+    let socket_path = ipc::start_control_socket_server(
+        &config.store_dir,
+        settings_state.clone(),
+        Some(approval_state.clone()),
+    )?;
     log::info!("GTK IPC socket: {}", socket_path.display());
     let app = adw::Application::builder()
         .application_id("org.linux_tpm_fido2.control")
@@ -70,6 +76,7 @@ pub fn launch(config: GtkUiConfig) -> Result<()> {
             &credentials,
             &settings,
             settings_state.clone(),
+            approval_state.clone(),
             &socket_path,
         );
     });
@@ -78,8 +85,11 @@ pub fn launch(config: GtkUiConfig) -> Result<()> {
     Ok(())
 }
 
-pub fn load_credential_summaries(dir: impl AsRef<Path>) -> Result<Vec<CredentialSummary>> {
-    let credentials = store::load_ctap2_credentials_from_dir(dir.as_ref())
+pub fn load_credential_summaries(
+    dir: impl AsRef<Path>,
+    user_id: Option<u32>,
+) -> Result<Vec<CredentialSummary>> {
+    let credentials = store::load_ctap2_credentials_from_dir(dir.as_ref(), user_id)
         .wrap_err("loading credentials for GTK UI")?;
 
     Ok(credentials
@@ -129,6 +139,7 @@ fn build_ui(
     credentials: &[CredentialSummary],
     settings: &UiSettings,
     settings_state: Arc<Mutex<UiSettings>>,
+    approval_state: Arc<ipc::ApprovalPromptState>,
     socket_path: &Path,
 ) {
     let window = adw::ApplicationWindow::builder()
@@ -142,7 +153,7 @@ fn build_ui(
     notebook.set_hexpand(true);
     notebook.set_vexpand(true);
 
-    let approval_page = build_approval_page(session);
+    let approval_page = build_approval_page(session, approval_state);
     let approval_label = Label::new(Some("Approval"));
     notebook.append_page(&approval_page, Some(&approval_label));
 
@@ -160,7 +171,10 @@ fn build_ui(
     window.present();
 }
 
-fn build_approval_page(session: &session::SessionContext) -> GtkBox {
+fn build_approval_page(
+    session: &session::SessionContext,
+    approval_state: Arc<ipc::ApprovalPromptState>,
+) -> GtkBox {
     let page = GtkBox::new(Orientation::Vertical, 12);
     page.set_margin_top(24);
     page.set_margin_bottom(24);
@@ -188,16 +202,35 @@ fn build_approval_page(session: &session::SessionContext) -> GtkBox {
 
     {
         let result_label = result_label.clone();
+        let approval_state = approval_state.clone();
         accept.connect_clicked(move |_| {
+            approval_state.respond(true);
             result_label.set_text("Approved.");
             log::info!("GTK approval accepted for current session");
         });
     }
     {
         let result_label = result_label.clone();
+        let approval_state = approval_state.clone();
         reject.connect_clicked(move |_| {
+            approval_state.respond(false);
             result_label.set_text("Rejected.");
             log::info!("GTK approval rejected for current session");
+        });
+    }
+
+    {
+        let prompt_label = prompt_label.clone();
+        let result_label = result_label.clone();
+        let approval_state = approval_state.clone();
+        glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
+            if let Some(prompt) = approval_state.snapshot() {
+                prompt_label.set_text(&format!("{}\n{}", prompt.session.describe(), prompt.prompt));
+                result_label.set_text("Waiting for user action.");
+            } else {
+                prompt_label.set_text("Waiting for a request.");
+            }
+            ControlFlow::Continue
         });
     }
 
@@ -403,7 +436,7 @@ mod tests {
                 .as_nanos()
         ));
 
-        let summaries = load_credential_summaries(&dir).expect("load summaries");
+        let summaries = load_credential_summaries(&dir, None).expect("load summaries");
         assert!(summaries.is_empty());
     }
 
@@ -421,6 +454,7 @@ mod tests {
         let credentials = vec![StoredCtap2Credential {
             id: vec![1],
             rp_id: "example.com".to_owned(),
+            user_id: Some(1000),
             user_handle: vec![2],
             user_name: Some("alice".to_owned()),
             user_display_name: Some("Alice Example".to_owned()),
@@ -436,7 +470,7 @@ mod tests {
         }];
         store::save_ctap2_credentials_to_dir(&dir, &credentials).expect("save credentials");
 
-        let summaries = load_credential_summaries(&dir).expect("load summaries");
+        let summaries = load_credential_summaries(&dir, Some(1000)).expect("load summaries");
         assert_eq!(
             summaries,
             vec![CredentialSummary {

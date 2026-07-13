@@ -100,7 +100,7 @@ mod tests {
 
         let settings = Arc::new(Mutex::new(UiSettings::default()));
         let _socket_path =
-            ipc::start_control_socket_server(&dir, settings).expect("start ipc server");
+            ipc::start_control_socket_server(&dir, settings, None).expect("start ipc server");
 
         let session = SessionContext {
             model: DaemonSessionModel::ActiveGraphicalSession,

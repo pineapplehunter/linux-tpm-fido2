@@ -6,6 +6,7 @@
 - A Rust crate now exists. The current implementation is an early skeleton for UHID, CTAPHID, minimal CTAP2 `getInfo`, TPM placeholders, and project-local dev storage.
 - TPM signing, credential registration/assertion, persistent credential storage, and recovery-slot generation are implemented; GUI is not fully implemented yet.
 - Never overwrite an existing migration SQL file. Only add new migration files.
+- CTAP2 credential storage records a `user_id` and the daemon prefers `SUDO_UID` when running under sudo so credentials can be scoped to the connected user.
 
 ## Project Direction
 
@@ -14,7 +15,7 @@
 - Secure-boot PCR binding is wired into the current credential create/assert flow; configurable PCR selections still need follow-up work.
 - Recovery uses passphrase-unlocked material that remains TPM-bound but is not PCR-bound; the current path is env-controlled until GTK settings exist.
 - The daemon model is a single system daemon that records active session identity at startup and uses it to scope approval prompts.
-- Planned UI is GTK/libadwaita: a standalone approval/settings control surface exists, persists TOML preferences in the store directory, and serves a Unix-socket IPC seam that the daemon-side GTK integration can wire into later.
+- Planned UI is GTK/libadwaita: a standalone approval/settings control surface exists, persists TOML preferences in the store directory, and now serves the approval IPC path that blocks the daemon until the user accepts or rejects.
 - Credential storage now uses normalized metadata, keyslot, and token tables as a LUKS2-style step toward structured unlock mechanisms and separated secrets.
 
 ## Nix Workflow

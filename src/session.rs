@@ -45,7 +45,10 @@ impl SessionContext {
                 .ok()
                 .filter(|value| !value.is_empty())
                 .or_else(|| env::var("USER").ok().filter(|value| !value.is_empty())),
-            uid: env::var("UID").ok().and_then(|value| value.parse().ok()),
+            uid: env::var("SUDO_UID")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .or_else(|| env::var("UID").ok().and_then(|value| value.parse().ok())),
             session_id: env::var("XDG_SESSION_ID")
                 .ok()
                 .filter(|value| !value.is_empty()),

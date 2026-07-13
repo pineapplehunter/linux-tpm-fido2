@@ -64,6 +64,7 @@ struct PendingAssertion {
 struct Credential {
     id: Vec<u8>,
     rp_id: String,
+    user_id: Option<u32>,
     user_handle: Vec<u8>,
     user_name: Option<String>,
     user_display_name: Option<String>,
@@ -77,12 +78,13 @@ impl Authenticator {
     pub fn new(store_dir: PathBuf, tpm_path: Option<PathBuf>) -> Self {
         let session = session::SessionContext::detect();
         let tpm = None;
-        let credentials = match store::load_ctap2_credentials_from_dir(&store_dir) {
+        let credentials = match store::load_ctap2_credentials_from_dir(&store_dir, session.uid) {
             Ok(credentials) => credentials
                 .into_iter()
                 .map(|credential| Credential {
                     id: credential.id,
                     rp_id: credential.rp_id,
+                    user_id: credential.user_id,
                     user_handle: credential.user_handle,
                     user_name: credential.user_name,
                     user_display_name: credential.user_display_name,
@@ -230,6 +232,7 @@ impl Authenticator {
         self.credentials.push(Credential {
             id: credential_id,
             rp_id: rp_id.to_owned(),
+            user_id: self.session.uid,
             user_handle: user_handle.to_vec(),
             user_name: user_name.map(str::to_owned),
             user_display_name: user_display_name.map(str::to_owned),
@@ -441,6 +444,7 @@ impl Authenticator {
             .map(|credential| store::StoredCtap2Credential {
                 id: credential.id.clone(),
                 rp_id: credential.rp_id.clone(),
+                user_id: credential.user_id,
                 user_handle: credential.user_handle.clone(),
                 user_name: credential.user_name.clone(),
                 user_display_name: credential.user_display_name.clone(),
@@ -1268,6 +1272,7 @@ mod tests {
             .map(|credential| store::StoredCtap2Credential {
                 id: credential.id.clone(),
                 rp_id: rp_id.to_owned(),
+                user_id: Some(1000),
                 user_handle: credential.user_handle.clone(),
                 user_name: credential.user_name.clone(),
                 user_display_name: credential.user_display_name.clone(),
@@ -1304,6 +1309,7 @@ mod tests {
                 .map(|credential| Credential {
                     id: credential.id,
                     rp_id: rp_id.to_owned(),
+                    user_id: Some(1000),
                     user_handle: credential.user_handle,
                     user_name: credential.user_name,
                     user_display_name: credential.user_display_name,
