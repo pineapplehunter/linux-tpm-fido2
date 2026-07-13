@@ -42,6 +42,7 @@
 - [x] SQLite storage now uses normalized metadata, keyslot, and token tables for CTAP2 credentials.
 - [x] Daemon/user-session model is now explicit: a system daemon routes approvals against the active graphical session and logs session identity at startup.
 - [x] GTK approval and settings UI prototype exists as a standalone GTK4 control surface.
+- [x] CTAP2 requests with `uv=true` continue through the local approval flow instead of failing with `UnsupportedOption`.
 
 ## In Progress
 

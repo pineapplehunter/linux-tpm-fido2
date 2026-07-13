@@ -23,7 +23,6 @@ enum ErrorStatus {
     CredentialExcluded = 0x19,
     UnsupportedAlgorithm = 0x26,
     OperationDenied = 0x27,
-    UnsupportedOption = 0x2b,
     NoCredentials = 0x2e,
 }
 
@@ -688,8 +687,7 @@ fn validate_common_options(options: Option<&[(Value, Value)]>) -> Result<(), Err
     };
 
     if map_bool(options, "uv") == Some(true) {
-        log::info!("request requires user verification, which is not implemented");
-        return Err(ErrorStatus::UnsupportedOption);
+        log::info!("request requires user verification; continuing with local approval flow");
     }
     if map_bool(options, "up") == Some(false) {
         log::debug!("request disables user presence; continuing with local approval prompt");
@@ -1035,11 +1033,11 @@ mod tests {
     fn options_reject_required_user_verification() {
         assert_eq!(
             validate_make_credential_options(Some(&options_map(&[("uv", true)]))),
-            Err(ErrorStatus::UnsupportedOption)
+            Ok(())
         );
         assert_eq!(
             validate_get_assertion_options(Some(&options_map(&[("uv", true)]))),
-            Err(ErrorStatus::UnsupportedOption)
+            Ok(())
         );
     }
 
