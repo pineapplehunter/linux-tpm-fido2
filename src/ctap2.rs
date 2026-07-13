@@ -655,14 +655,14 @@ fn supports_es256(value: &Value) -> bool {
 }
 
 fn validate_make_credential_options(options: Option<&[(Value, Value)]>) -> Result<(), ErrorStatus> {
-    validate_common_options(options)?;
+    validate_common_options(options, true)?;
     // Discoverable credentials are acceptable because credentials are stored locally.
     let _rk = options.and_then(|options| map_bool(options, "rk"));
     Ok(())
 }
 
 fn validate_get_assertion_options(options: Option<&[(Value, Value)]>) -> Result<(), ErrorStatus> {
-    validate_common_options(options)
+    validate_common_options(options, false)
 }
 
 fn validate_credential_descriptor_list(list: Option<&[Value]>) -> Result<(), ErrorStatus> {
@@ -685,7 +685,10 @@ fn validate_credential_descriptor_list(list: Option<&[Value]>) -> Result<(), Err
     Ok(())
 }
 
-fn validate_common_options(options: Option<&[(Value, Value)]>) -> Result<(), ErrorStatus> {
+fn validate_common_options(
+    options: Option<&[(Value, Value)]>,
+    reject_user_presence_false: bool,
+) -> Result<(), ErrorStatus> {
     let Some(options) = options else {
         return Ok(());
     };
@@ -694,8 +697,11 @@ fn validate_common_options(options: Option<&[(Value, Value)]>) -> Result<(), Err
         log::info!("request requires user verification; continuing with local approval flow");
     }
     if map_bool(options, "up") == Some(false) {
-        log::info!("request disables user presence, which is not supported");
-        return Err(ErrorStatus::UnsupportedOption);
+        log::info!("request disables user presence");
+        if reject_user_presence_false {
+            log::info!("request disables user presence, which is not supported");
+            return Err(ErrorStatus::UnsupportedOption);
+        }
     }
 
     Ok(())
@@ -1039,6 +1045,10 @@ mod tests {
             validate_get_assertion_options(Some(&options_map(&[("up", true)]))),
             Ok(())
         );
+        assert_eq!(
+            validate_get_assertion_options(Some(&options_map(&[("up", false)]))),
+            Ok(())
+        );
     }
 
     #[test]
@@ -1057,10 +1067,6 @@ mod tests {
     fn options_reject_disabled_user_presence() {
         assert_eq!(
             validate_make_credential_options(Some(&options_map(&[("up", false)]))),
-            Err(ErrorStatus::UnsupportedOption)
-        );
-        assert_eq!(
-            validate_get_assertion_options(Some(&options_map(&[("up", false)]))),
             Err(ErrorStatus::UnsupportedOption)
         );
     }
