@@ -3,9 +3,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{approval, store};
+use crate::{approval, store, tpm};
 use ciborium::value::Value;
-use p256::ecdsa::{Signature, SigningKey, signature::Signer};
 use sha2::{Digest, Sha256};
 
 pub const CMD_AUTHENTICATOR_MAKE_CREDENTIAL: u8 = 0x01;
@@ -13,7 +12,7 @@ pub const CMD_AUTHENTICATOR_GET_ASSERTION: u8 = 0x02;
 pub const CMD_AUTHENTICATOR_GET_INFO: u8 = 0x04;
 
 const CTAP2_OK: u8 = 0x00;
-const CTAP1_ERR_INVALID_COMMAND: u8 = 0x01;
+const CTAP_ERR_INVALID_COMMAND: u8 = 0x01;
 const CTAP2_ERR_INVALID_CBOR: u8 = 0x12;
 const CTAP2_ERR_MISSING_PARAMETER: u8 = 0x14;
 const CTAP2_ERR_UNSUPPORTED_ALGORITHM: u8 = 0x26;
@@ -28,6 +27,7 @@ pub const AAGUID: [u8; 16] = [
 
 pub struct Authenticator {
     store_dir: PathBuf,
+    tpm: Option<tpm::Tpm>,
     credentials: Vec<Credential>,
     recent_assertion_approval: Option<RecentAssertionApproval>,
 }
@@ -43,44 +43,50 @@ struct Credential {
     user_handle: Vec<u8>,
     user_name: Option<String>,
     user_display_name: Option<String>,
-    signing_key: SigningKey,
+    key: tpm::TpmCredential,
     sign_count: u32,
 }
 
 impl Authenticator {
-    pub fn new(store_dir: PathBuf) -> Self {
+    pub fn new(store_dir: PathBuf, tpm_path: Option<PathBuf>) -> Self {
+        let tpm = tpm_path.and_then(|path| match tpm::Tpm::open(&path) {
+            Ok(tpm) => Some(tpm),
+            Err(error) => {
+                log::warn!(
+                    "failed to open TPM for CTAP2 credentials at {}: {error:?}",
+                    path.display()
+                );
+                None
+            }
+        });
         let credentials = match store::load_ctap2_credentials_from_dir(&store_dir) {
             Ok(credentials) => credentials
                 .into_iter()
-                .filter_map(
-                    |credential| match SigningKey::from_slice(&credential.private_key) {
-                        Ok(signing_key) => Some(Credential {
-                            id: credential.id,
-                            rp_id: credential.rp_id,
-                            user_handle: credential.user_handle,
-                            user_name: credential.user_name,
-                            user_display_name: credential.user_display_name,
-                            signing_key,
-                            sign_count: credential.sign_count,
-                        }),
-                        Err(error) => {
-                            log::warn!(
-                                "skipping stored CTAP2 credential with invalid key: {error}"
-                            );
-                            None
-                        }
+                .map(|credential| Credential {
+                    id: credential.id,
+                    rp_id: credential.rp_id,
+                    user_handle: credential.user_handle,
+                    user_name: credential.user_name,
+                    user_display_name: credential.user_display_name,
+                    key: tpm::TpmCredential {
+                        private: credential.key.private,
+                        public: credential.key.public,
+                        public_key_x: credential.key.public_key_x,
+                        public_key_y: credential.key.public_key_y,
                     },
-                )
+                    sign_count: credential.sign_count,
+                })
                 .collect(),
             Err(error) => {
                 log::warn!("failed to load CTAP2 credential store: {error:?}");
                 Vec::new()
             }
         };
-        log::info!("loaded {} software CTAP2 credentials", credentials.len());
+        log::info!("loaded {} TPM-backed CTAP2 credentials", credentials.len());
 
         Self {
             store_dir,
+            tpm,
             credentials,
             recent_assertion_approval: None,
         }
@@ -88,7 +94,7 @@ impl Authenticator {
 
     pub fn handle_cbor(&mut self, payload: &[u8]) -> Vec<u8> {
         let Some((&command, body)) = payload.split_first() else {
-            return vec![CTAP1_ERR_INVALID_COMMAND];
+            return vec![CTAP_ERR_INVALID_COMMAND];
         };
 
         log::info!("ctap2 command: {}", command_name(command));
@@ -97,7 +103,7 @@ impl Authenticator {
             CMD_AUTHENTICATOR_GET_INFO => get_info_response(),
             CMD_AUTHENTICATOR_MAKE_CREDENTIAL => self.make_credential(body),
             CMD_AUTHENTICATOR_GET_ASSERTION => self.get_assertion(body),
-            _ => vec![CTAP1_ERR_INVALID_COMMAND],
+            _ => vec![CTAP_ERR_INVALID_COMMAND],
         }
     }
 
@@ -141,8 +147,19 @@ impl Authenticator {
             return vec![CTAP2_ERR_OPERATION_DENIED];
         }
 
-        let signing_key = random_signing_key();
-        let public_key = cose_public_key(&signing_key);
+        let Some(tpm) = self.tpm.as_mut() else {
+            log::warn!("cannot create CTAP2 credential without TPM context");
+            return vec![CTAP2_ERR_OPERATION_DENIED];
+        };
+        let key = match tpm.create_credential_key() {
+            Ok(credential) => credential,
+            Err(error) => {
+                log::warn!("failed to create TPM-backed CTAP2 credential key: {error:?}");
+                return vec![CTAP2_ERR_OPERATION_DENIED];
+            }
+        };
+        log::info!("created TPM-backed CTAP2 credential key");
+        let public_key = cose_credential_public_key(&key);
         let mut credential_id = vec![0u8; 32];
         fill_random(&mut credential_id);
 
@@ -153,13 +170,13 @@ impl Authenticator {
             user_handle: user_handle.to_vec(),
             user_name: user_name.map(str::to_owned),
             user_display_name: user_display_name.map(str::to_owned),
-            signing_key,
+            key,
             sign_count: 0,
         });
         self.save_credentials();
 
         log::info!(
-            "created software credential rp_id={} total_credentials={}",
+            "created TPM-backed credential rp_id={} total_credentials={}",
             rp_id,
             self.credentials.len()
         );
@@ -195,13 +212,10 @@ impl Authenticator {
             return vec![CTAP2_ERR_OPERATION_DENIED];
         }
 
-        let response = {
+        let (auth_data, user, credential_id, key, rp_log, sign_count) = {
             let credential = &mut self.credentials[credential_index];
             credential.sign_count = credential.sign_count.saturating_add(1);
             let auth_data = make_auth_data(&credential.rp_id, 0x01, credential.sign_count, None);
-            let mut signed_data = auth_data.clone();
-            signed_data.extend_from_slice(client_data_hash);
-            let signature: Signature = credential.signing_key.sign(&signed_data);
 
             let mut user = vec![(
                 Value::Text("id".to_owned()),
@@ -217,34 +231,47 @@ impl Authenticator {
                 ));
             }
 
-            log::info!(
-                "asserting software credential rp_id={} sign_count={}",
-                credential.rp_id,
-                credential.sign_count
-            );
-
-            encode_response(Value::Map(vec![
-                (
-                    Value::Integer(1.into()),
-                    Value::Map(vec![
-                        (
-                            Value::Text("type".to_owned()),
-                            Value::Text("public-key".to_owned()),
-                        ),
-                        (
-                            Value::Text("id".to_owned()),
-                            Value::Bytes(credential.id.clone()),
-                        ),
-                    ]),
-                ),
-                (Value::Integer(2.into()), Value::Bytes(auth_data)),
-                (
-                    Value::Integer(3.into()),
-                    Value::Bytes(signature.to_der().as_bytes().to_vec()),
-                ),
-                (Value::Integer(4.into()), Value::Map(user)),
-            ]))
+            (
+                auth_data,
+                user,
+                credential.id.clone(),
+                credential.key.clone(),
+                credential.rp_id.clone(),
+                credential.sign_count,
+            )
         };
+
+        let mut signed_data = auth_data.clone();
+        signed_data.extend_from_slice(client_data_hash);
+        let signature = match sign_credential(&mut self.tpm, &key, &signed_data) {
+            Ok(signature) => signature,
+            Err(error) => {
+                log::warn!("failed to sign CTAP2 assertion: {error:?}");
+                return vec![CTAP2_ERR_OPERATION_DENIED];
+            }
+        };
+
+        log::info!(
+            "asserting credential rp_id={} sign_count={}",
+            rp_log,
+            sign_count
+        );
+
+        let response = encode_response(Value::Map(vec![
+            (
+                Value::Integer(1.into()),
+                Value::Map(vec![
+                    (
+                        Value::Text("type".to_owned()),
+                        Value::Text("public-key".to_owned()),
+                    ),
+                    (Value::Text("id".to_owned()), Value::Bytes(credential_id)),
+                ]),
+            ),
+            (Value::Integer(2.into()), Value::Bytes(auth_data)),
+            (Value::Integer(3.into()), Value::Bytes(signature)),
+            (Value::Integer(4.into()), Value::Map(user)),
+        ]));
         self.save_credentials();
         response
     }
@@ -259,7 +286,12 @@ impl Authenticator {
                 user_handle: credential.user_handle.clone(),
                 user_name: credential.user_name.clone(),
                 user_display_name: credential.user_display_name.clone(),
-                private_key: credential.signing_key.to_bytes().to_vec(),
+                key: store::StoredTpmKey {
+                    private: credential.key.private.clone(),
+                    public: credential.key.public.clone(),
+                    public_key_x: credential.key.public_key_x.clone(),
+                    public_key_y: credential.key.public_key_y.clone(),
+                },
                 sign_count: credential.sign_count,
             })
             .collect();
@@ -269,7 +301,7 @@ impl Authenticator {
             log::warn!("failed to save CTAP2 credential store: {error:?}");
         } else {
             log::info!(
-                "saved {} software CTAP2 credentials to {}",
+                "saved {} TPM-backed CTAP2 credentials to {}",
                 credentials.len(),
                 path.display()
             );
@@ -302,7 +334,7 @@ impl Authenticator {
 
 impl Default for Authenticator {
     fn default() -> Self {
-        Self::new(store::dev_store_dir())
+        Self::new(store::dev_store_dir(), None)
     }
 }
 
@@ -454,11 +486,11 @@ fn make_auth_data(
     auth_data
 }
 
-fn cose_public_key(signing_key: &SigningKey) -> Value {
-    let encoded = signing_key.verifying_key().to_sec1_point(false);
-    let x = encoded.x().expect("P-256 x coordinate").to_vec();
-    let y = encoded.y().expect("P-256 y coordinate").to_vec();
+fn cose_credential_public_key(key: &tpm::TpmCredential) -> Value {
+    cose_public_key_coordinates(key.public_key_x.clone(), key.public_key_y.clone())
+}
 
+fn cose_public_key_coordinates(x: Vec<u8>, y: Vec<u8>) -> Value {
     Value::Map(vec![
         (Value::Integer(1.into()), Value::Integer(2.into())),
         (
@@ -471,14 +503,16 @@ fn cose_public_key(signing_key: &SigningKey) -> Value {
     ])
 }
 
-fn random_signing_key() -> SigningKey {
-    loop {
-        let mut private_key = [0u8; 32];
-        fill_random(&mut private_key);
-        if let Ok(signing_key) = SigningKey::from_slice(&private_key) {
-            return signing_key;
-        }
-    }
+fn sign_credential(
+    tpm: &mut Option<tpm::Tpm>,
+    key: &tpm::TpmCredential,
+    signed_data: &[u8],
+) -> color_eyre::Result<Vec<u8>> {
+    let tpm = tpm
+        .as_mut()
+        .ok_or_else(|| color_eyre::eyre::eyre!("TPM credential requires TPM context"))?;
+    let digest = Sha256::digest(signed_data);
+    tpm.sign_digest(key, &digest)
 }
 
 fn fill_random(bytes: &mut [u8]) {
@@ -529,7 +563,7 @@ mod tests {
     fn unknown_command_is_rejected() {
         assert_eq!(
             Authenticator::default().handle_cbor(&[0xff]),
-            vec![CTAP1_ERR_INVALID_COMMAND]
+            vec![CTAP_ERR_INVALID_COMMAND]
         );
     }
 }

@@ -4,22 +4,24 @@
 
 - Rust crate exists with core modules for `hid`, `ctaphid`, `ctap2`, `tpm`, and `store`.
 - The daemon presents a Linux UHID virtual FIDO HID device using usage page `0xF1D0`, usage `0x01`, and 64-byte reports.
-- CTAPHID framing works for `INIT`, `PING`, `MSG`, `CBOR`, `WINK`, `CANCEL`, and `ERROR`.
-- Browser registration and authentication work in Firefox and Chrome through the current software authenticator paths.
-- U2F compatibility works through `CTAPHID_MSG` with software P-256 credentials.
+- CTAPHID framing works for `INIT`, `PING`, `CBOR`, `WINK`, `CANCEL`, and `ERROR`.
+- Browser registration and authentication have worked in Firefox with TPM-backed CTAP2 credentials.
 - Minimal CTAP2 works through `CTAPHID_CBOR` with `authenticatorGetInfo`, `authenticatorMakeCredential`, and `authenticatorGetAssertion`.
-- CLI yes/no prompts provide early user-presence approval for U2F and CTAP2 registration/authentication.
+- CLI yes/no prompts provide early user-presence approval for CTAP2 registration/authentication.
 - Development credentials are persisted in a project-local, git-ignored store.
 - Startup logs the exact credential file paths.
-- TPM signing, PCR binding, recovery slots, durable production metadata, and GUI are not implemented yet.
+- The dev shell includes `tpm2-tss`, and the Rust crate links `tss-esapi`.
+- Runtime TPM probing can open `/dev/tpmrm0`, read TPM RNG output, create a transient P-256 ECDSA signing key, and sign a test digest.
+- CTAP2 creates TPM-backed P-256 credentials, storing TPM private/public blobs plus public coordinates.
+- CTAP2 assertion signs with TPM-backed credentials.
+- PCR binding, recovery slots, durable production metadata, and GUI are not implemented yet.
 
 ## Credential Files
 
 - Default store directory: `.linux-tpm-fido2-store`.
 - Override store directory with `--store-dir <path>`.
-- U2F software credentials are saved to `u2f-credentials.json`.
-- CTAP2 software credentials are saved to `ctap2-credentials.json`.
-- These files currently contain development software private keys and must not be treated as secure production storage.
+- CTAP2 TPM-backed credentials are saved to `ctap2-credentials.json`.
+- The JSON format is still development storage and must not be treated as production metadata.
 
 ## Near-Term Workflow
 
@@ -31,10 +33,10 @@
 
 ## Next Milestones
 
-1. Replace software CTAP2 signing with TPM 2.0 ECC P-256 signing keys via `tss-esapi`.
-2. Store TPM public/private blobs and credential metadata instead of CTAP2 software private keys.
+1. Test TPM-backed CTAP2 registration/login against Firefox and Chrome, including daemon restart.
+2. Add clearer store visibility/logging for CTAP2 TPM-backed credential counts.
 3. Improve CTAP2 request handling enough for robust browser behavior: options, exclude list, allow list edge cases, user presence flags, and better CTAP status codes.
-4. Replace U2F software signing with TPM-backed signing or decide whether to keep U2F as a development-only compatibility path.
+4. Add explicit migration/reset guidance for older development stores that contain removed software credential records.
 5. Add signature-counter persistence semantics that are safe across crashes and failed writes.
 6. Add PCR-bound credential creation and assertion, starting with secure boot state.
 7. Add recovery slots using passphrase-unlocked material that remains TPM-bound but is not PCR-bound.
@@ -45,7 +47,7 @@
 ## Architecture Direction
 
 - `hid` owns the UHID report descriptor and virtual HID identity.
-- `ctaphid` owns HID packet framing, channel allocation, request assembly, U2F compatibility, and CTAPHID responses.
+- `ctaphid` owns HID packet framing, channel allocation, request assembly, and CTAPHID responses.
 - `ctap2` owns CBOR command parsing, authenticator data, credential lookup, and assertion response shape.
 - `store` owns the development credential file format and will evolve toward production metadata.
 - `tpm` should own key creation/loading, signing, PCR policy sessions, recovery wrapping, and TPM capability checks.
@@ -55,11 +57,11 @@
 - Per-user credential binding needs a deliberate design. A system daemon receiving raw HID traffic does not automatically know which Unix user or browser process initiated a CTAP request.
 - Possible user-binding designs include a per-user daemon that creates a per-session virtual authenticator, a privileged system broker with per-user/session helpers, or a system daemon that routes requests to the active graphical session for approval and credential namespace selection.
 - The service model should avoid making all users share one credential namespace unless that is explicitly intended.
-- TPM-backed credential storage needs a decision on whether each credential is its own TPM key, a TPM-wrapped software key, or a hybrid model during development.
+- TPM-backed credential storage currently uses one TPM child key per credential; the production parent/policy model still needs a deliberate design.
 
 ## Non-Goals For Now
 
 - No browser extension.
 - No GTK until the non-GUI authenticator works with TPM-backed credentials.
 - No claim of FIDO certification compatibility until the protocol is much more complete.
-- No production security claims for the development software credential store.
+- No production security claims for the development credential store.

@@ -31,16 +31,18 @@ nix develop
 Useful commands:
 
 ```sh
-cargo fmt
-cargo check
-cargo test
-cargo run -- --dry-run
+nix develop -c cargo fmt
+nix develop -c cargo check
+nix develop -c cargo test
+nix develop -c cargo run -- --dry-run
 ```
 
-Logging uses the `log` crate with `env_logger`; default level is `info`. Use `RUST_LOG=debug cargo run -- ...` for lower-level UHID diagnostics.
+Logging uses the `log` crate with `env_logger`; default level is `info`. Use `RUST_LOG=debug nix develop -c cargo run -- ...` for lower-level UHID diagnostics.
 
-The daemon currently accepts `--uhid-path` and `--tpm-path`; defaults are `/dev/uhid` and `/dev/tpmrm0`. A real run will usually need `sudo` or udev permissions that allow access to those device nodes.
+The daemon currently accepts `--uhid-path`, `--tpm-path`, `--store-dir`, and `--dry-run`. Defaults are `/dev/uhid`, `/dev/tpmrm0`, and `.linux-tpm-fido2-store`. A real run will usually need `sudo` or udev permissions that allow access to the UHID and TPM device nodes.
 
 ## Current Status
 
-The first Rust skeleton exists. It can create a UHID-backed FIDO HID device and contains initial CTAPHID handling for `INIT`, `PING`, and `CBOR` with a minimal CTAP2 `authenticatorGetInfo` response. TPM signing, credential storage, registration, assertion, recovery, and GUI are not implemented yet.
+The daemon can create a UHID-backed FIDO HID device, handle CTAPHID `INIT`, `PING`, `CBOR`, `WINK`, and `CANCEL`, and implement CTAP2 `authenticatorGetInfo`, `authenticatorMakeCredential`, and `authenticatorGetAssertion`.
+
+CTAP2 credentials are TPM-backed P-256 ECDSA keys persisted as TPM private/public blobs in the development JSON store. TPM PCR binding, recovery, production metadata durability, and GUI are not implemented yet.

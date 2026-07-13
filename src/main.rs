@@ -17,10 +17,6 @@ fn main() -> Result<()> {
     let store_dir = absolute_path(&config.store_dir);
     log::info!("dev store: {}", store_dir.display());
     log::info!(
-        "U2F credential file: {}",
-        store::u2f_credentials_path_in_dir(&store_dir).display()
-    );
-    log::info!(
         "CTAP2 credential file: {}",
         store::ctap2_credentials_path_in_dir(&store_dir).display()
     );
@@ -35,12 +31,20 @@ fn main() -> Result<()> {
             "warning: TPM device {} is not accessible yet: {error}",
             config.tpm_path.display()
         );
+    } else {
+        match tpm::Tpm::open(&config.tpm_path).and_then(|mut tpm| tpm.probe()) {
+            Ok(()) => log::info!("TPM device is accessible"),
+            Err(error) => log::warn!(
+                "warning: TPM device {} exists but probe failed: {error:?}",
+                config.tpm_path.display()
+            ),
+        }
     }
 
     let mut device = UHIDDevice::create_with_path(hid::create_params(), &config.uhid_path)
         .wrap_err_with(|| format!("opening UHID device {}", config.uhid_path.display()))?;
     log::info!("created virtual FIDO HID device; waiting for host reports");
-    let mut ctaphid = ctaphid::PacketHandler::new(store_dir);
+    let mut ctaphid = ctaphid::PacketHandler::new(store_dir, Some(config.tpm_path.clone()));
 
     loop {
         match device.read() {
@@ -137,7 +141,7 @@ struct Config {
     #[arg(long, default_value = "/dev/tpmrm0")]
     tpm_path: PathBuf,
 
-    /// Directory for development software credentials.
+    /// Directory for development TPM-backed credentials.
     #[arg(long, default_value = store::DEV_STORE_DIR)]
     store_dir: PathBuf,
 }
