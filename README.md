@@ -44,7 +44,7 @@ Logging uses the `log` crate with `env_logger`; default level is `info`. Use `RU
 
 The daemon currently accepts `--uhid-path`, `--tpm-path`, `--store-dir`, and `--dry-run`. Defaults are `/dev/uhid`, `/dev/tpmrm0`, and `.linux-tpm-fido2-store`. A real run will usually need `sudo` or udev permissions that allow access to the UHID and TPM device nodes.
 
-There is also a standalone GTK4 control surface in `src/bin/linux-tpm-fido2-ui.rs` that shows an approval pane and a settings pane backed by the SQLite credential store.
+There is also a standalone GTK4 control surface in `src/bin/linux-tpm-fido2-ui.rs` that shows an approval pane and a settings pane backed by the SQLite credential store and a `ui-settings.toml` file in the store directory.
 
 `nix fmt` uses treefmt-nix to run `nixfmt`, `rustfmt`, and `taplo` from the flake.
 
@@ -52,4 +52,4 @@ There is also a standalone GTK4 control surface in `src/bin/linux-tpm-fido2-ui.r
 
 The daemon can create a UHID-backed FIDO HID device, handle CTAPHID `INIT`, `PING`, `CBOR`, `WINK`, and `CANCEL`, and implement CTAP2 `authenticatorGetInfo`, `authenticatorMakeCredential`, and `authenticatorGetAssertion`.
 
-CTAP2 credentials are TPM-backed P-256 ECDSA keys persisted in a normalized SQLite store with separate metadata, keyslot, and token tables managed by `sqlx` migrations. Secure-boot PCR binding is wired for credential creation and assertion; recovery slots can now be generated during registration with `LINUX_TPM_FIDO2_RECOVERY_PASSPHRASE`, approval prompts are scoped to the active graphical session, and the GTK control surface is in place while production metadata durability remains pending.
+CTAP2 credentials are TPM-backed P-256 ECDSA keys persisted in a normalized SQLite store with separate metadata, keyslot, and token tables managed by `sqlx` migrations. Secure-boot PCR binding is wired for credential creation and assertion; recovery slots can now be generated during registration with `LINUX_TPM_FIDO2_RECOVERY_PASSPHRASE`, approval prompts are scoped to the active graphical session, and the GTK control surface now persists its own TOML settings file while production metadata durability remains pending.

@@ -1521,9 +1521,11 @@ dependencies = [
  "log",
  "p256",
  "rcgen",
+ "serde",
  "sha2 0.11.0",
  "sqlx",
  "tokio",
+ "toml",
  "tss-esapi",
  "uhid-virt",
 ]

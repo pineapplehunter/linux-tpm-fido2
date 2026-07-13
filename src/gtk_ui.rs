@@ -1,10 +1,14 @@
-use std::path::{Path, PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use color_eyre::{Result, eyre::WrapErr};
 use gtk4::{
-    Application, ApplicationWindow, Box as GtkBox, Button, Label, ListBox, ListBoxRow, Notebook,
-    Orientation, ScrolledWindow, prelude::*,
+    Application, ApplicationWindow, Box as GtkBox, Button, Entry, Label, ListBox, ListBoxRow,
+    Notebook, Orientation, ScrolledWindow, prelude::*,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::{session, store};
 
@@ -21,6 +25,21 @@ pub struct GtkUiConfig {
     pub store_dir: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiSettings {
+    pub pinned_relying_parties: Vec<String>,
+    pub recovery_label: String,
+}
+
+impl Default for UiSettings {
+    fn default() -> Self {
+        Self {
+            pinned_relying_parties: Vec::new(),
+            recovery_label: "recovery slot".to_owned(),
+        }
+    }
+}
+
 impl Default for GtkUiConfig {
     fn default() -> Self {
         Self {
@@ -31,13 +50,14 @@ impl Default for GtkUiConfig {
 
 pub fn launch(config: GtkUiConfig) -> Result<()> {
     let credentials = load_credential_summaries(&config.store_dir)?;
+    let settings = load_ui_settings_from_dir(&config.store_dir)?;
     let session = session::SessionContext::detect();
     let app = Application::builder()
         .application_id("org.linux_tpm_fido2.control")
         .build();
 
     app.connect_activate(move |app| {
-        build_ui(app, &session, &config.store_dir, &credentials);
+        build_ui(app, &session, &config.store_dir, &credentials, &settings);
     });
 
     let _code = app.run();
@@ -65,11 +85,35 @@ pub fn load_credential_summaries(dir: impl AsRef<Path>) -> Result<Vec<Credential
         .collect())
 }
 
+pub fn ui_settings_path_in_dir(dir: impl AsRef<Path>) -> PathBuf {
+    dir.as_ref().join("ui-settings.toml")
+}
+
+pub fn load_ui_settings_from_dir(dir: impl AsRef<Path>) -> Result<UiSettings> {
+    let path = ui_settings_path_in_dir(dir.as_ref());
+    if !path.exists() {
+        return Ok(UiSettings::default());
+    }
+
+    let raw = fs::read_to_string(&path)
+        .wrap_err_with(|| format!("reading GTK settings from {}", path.display()))?;
+    toml::from_str(&raw).wrap_err_with(|| format!("parsing GTK settings from {}", path.display()))
+}
+
+pub fn save_ui_settings_to_dir(dir: impl AsRef<Path>, settings: &UiSettings) -> Result<()> {
+    let path = ui_settings_path_in_dir(dir.as_ref());
+    let raw = toml::to_string_pretty(settings).wrap_err("serializing GTK settings to TOML")?;
+    fs::create_dir_all(dir.as_ref())
+        .wrap_err_with(|| format!("creating {}", dir.as_ref().display()))?;
+    fs::write(&path, raw).wrap_err_with(|| format!("writing GTK settings to {}", path.display()))
+}
+
 fn build_ui(
     app: &Application,
     session: &session::SessionContext,
     store_dir: &Path,
     credentials: &[CredentialSummary],
+    settings: &UiSettings,
 ) {
     let window = ApplicationWindow::builder()
         .application(app)
@@ -86,7 +130,7 @@ fn build_ui(
     let approval_label = Label::new(Some("Approval"));
     notebook.append_page(&approval_page, Some(&approval_label));
 
-    let settings_page = build_settings_page(store_dir, credentials);
+    let settings_page = build_settings_page(store_dir, credentials, settings);
     let settings_label = Label::new(Some("Settings"));
     notebook.append_page(&settings_page, Some(&settings_label));
 
@@ -146,7 +190,11 @@ fn build_approval_page(session: &session::SessionContext) -> GtkBox {
     page
 }
 
-fn build_settings_page(store_dir: &Path, credentials: &[CredentialSummary]) -> GtkBox {
+fn build_settings_page(
+    store_dir: &Path,
+    credentials: &[CredentialSummary],
+    settings: &UiSettings,
+) -> GtkBox {
     let page = GtkBox::new(Orientation::Vertical, 12);
     page.set_margin_top(24);
     page.set_margin_bottom(24);
@@ -159,6 +207,87 @@ fn build_settings_page(store_dir: &Path, credentials: &[CredentialSummary]) -> G
 
     let store_label = Label::new(Some(&format!("Store: {}", store_dir.display())));
     store_label.set_wrap(true);
+
+    let pinned_entry = Entry::new();
+    pinned_entry.set_placeholder_text(Some("example.com, login.example.com"));
+    pinned_entry.set_text(&settings.pinned_relying_parties.join(", "));
+
+    let recovery_entry = Entry::new();
+    recovery_entry.set_placeholder_text(Some("recovery slot"));
+    recovery_entry.set_text(&settings.recovery_label);
+
+    let save_status = Label::new(Some(&format!(
+        "Settings file: {}",
+        ui_settings_path_in_dir(store_dir).display()
+    )));
+    save_status.set_wrap(true);
+
+    let pinned_label = Label::new(Some("Pinned passkey IDs"));
+    pinned_label.add_css_class("heading");
+    pinned_label.set_wrap(true);
+
+    let recovery_label = Label::new(Some("Recovery passphrase label"));
+    recovery_label.add_css_class("heading");
+    recovery_label.set_wrap(true);
+
+    let save_button = Button::with_label("Save settings");
+    {
+        let store_dir = store_dir.to_path_buf();
+        let pinned_entry = pinned_entry.clone();
+        let recovery_entry = recovery_entry.clone();
+        let save_status = save_status.clone();
+        save_button.connect_clicked(move |_| {
+            let pinned_relying_parties = pinned_entry
+                .text()
+                .split(',')
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            let settings = UiSettings {
+                pinned_relying_parties,
+                recovery_label: recovery_entry.text().to_string(),
+            };
+
+            match save_ui_settings_to_dir(&store_dir, &settings) {
+                Ok(()) => {
+                    save_status.set_text(&format!(
+                        "Saved settings to {}",
+                        ui_settings_path_in_dir(&store_dir).display()
+                    ));
+                    log::info!(
+                        "saved GTK settings: pinned_ids={} recovery_label={}",
+                        settings.pinned_relying_parties.len(),
+                        settings.recovery_label
+                    );
+                }
+                Err(error) => {
+                    save_status.set_text(&format!("Failed to save settings: {error}"));
+                    log::warn!("failed to save GTK settings: {error:?}");
+                }
+            }
+        });
+    }
+
+    let pinned_hint = Label::new(Some(
+        "Comma-separated relying-party IDs shown in the control surface.",
+    ));
+    pinned_hint.set_wrap(true);
+
+    let recovery_hint = Label::new(Some(
+        "This label will be paired with the recovery passphrase configuration.",
+    ));
+    recovery_hint.set_wrap(true);
+
+    let form = GtkBox::new(Orientation::Vertical, 8);
+    form.append(&pinned_label);
+    form.append(&pinned_entry);
+    form.append(&pinned_hint);
+    form.append(&recovery_label);
+    form.append(&recovery_entry);
+    form.append(&recovery_hint);
+    form.append(&save_button);
+    form.append(&save_status);
 
     let scroller = ScrolledWindow::new();
     scroller.set_hexpand(true);
@@ -179,6 +308,7 @@ fn build_settings_page(store_dir: &Path, credentials: &[CredentialSummary]) -> G
 
     page.append(&title);
     page.append(&store_label);
+    page.append(&form);
     page.append(&scroller);
     page
 }
@@ -205,8 +335,32 @@ fn credential_row(summary: &CredentialSummary) -> ListBoxRow {
 
 #[cfg(test)]
 mod tests {
-    use super::{CredentialSummary, load_credential_summaries};
+    use super::{
+        CredentialSummary, UiSettings, load_credential_summaries, load_ui_settings_from_dir,
+        save_ui_settings_to_dir,
+    };
     use crate::store::{self, StoredCtap2Credential, StoredTpmKey};
+
+    #[test]
+    fn ui_settings_round_trip_through_toml() {
+        let dir = std::env::temp_dir().join(format!(
+            "linux-tpm-fido2-gtk-ui-settings-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time after Unix epoch")
+                .as_nanos()
+        ));
+
+        let settings = UiSettings {
+            pinned_relying_parties: vec!["example.com".to_owned(), "login.example.com".to_owned()],
+            recovery_label: "backup".to_owned(),
+        };
+        save_ui_settings_to_dir(&dir, &settings).expect("save settings");
+
+        let loaded = load_ui_settings_from_dir(&dir).expect("load settings");
+        assert_eq!(loaded, settings);
+    }
 
     #[test]
     fn missing_store_loads_no_credential_summaries() {

@@ -14,6 +14,7 @@ gtk4 = "0.11.4"
 log = "0.4.27"
 p256 = { version = "0.14", features = ["ecdsa"] }
 rcgen = { version = "0.14.8", features = ["ring"] }
+serde = { version = "1.0.228", features = ["derive"] }
 sha2 = "0.11"
 sqlx = { version = "0.9.0", features = [
   "runtime-tokio",
@@ -22,5 +23,6 @@ sqlx = { version = "0.9.0", features = [
   "migrate",
 ] }
 tokio = { version = "1.52.3", features = ["rt", "time"] }
+toml = "1.1.2"
 tss-esapi = "7.7.0"
 uhid-virt = "0.0.8"

@@ -46,6 +46,8 @@
 
 ## In Progress
 
+- [ ] GTK approval/settings UI is gaining TOML-backed preferences and a save action; daemon IPC wiring remains.
+
 ## Next
 
 - [ ] Improve CTAP2 request handling for browser edge cases.
