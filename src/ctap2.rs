@@ -134,13 +134,12 @@ impl Authenticator {
     fn make_credential(&mut self, body: &[u8]) -> Result<Vec<u8>, ErrorStatus> {
         let request = decode_map(body)?;
 
+        let client_data_hash = map_bytes(&request, 1).ok_or(ErrorStatus::MissingParameter)?;
+        validate_client_data_hash(client_data_hash)?;
         let rp = map_map(&request, 2).ok_or(ErrorStatus::MissingParameter)?;
         let user = map_map(&request, 3).ok_or(ErrorStatus::MissingParameter)?;
         let params = map_array(&request, 4).ok_or(ErrorStatus::MissingParameter)?;
 
-        if map_bytes(&request, 1).is_none() {
-            return Err(ErrorStatus::MissingParameter);
-        }
         if !params.iter().any(supports_es256) {
             return Err(ErrorStatus::UnsupportedAlgorithm);
         }
@@ -254,6 +253,7 @@ impl Authenticator {
 
         let rp_id = map_text(&request, 1).ok_or(ErrorStatus::MissingParameter)?;
         let client_data_hash = map_bytes(&request, 2).ok_or(ErrorStatus::MissingParameter)?;
+        validate_client_data_hash(client_data_hash)?;
         let allow_list = map_array(&request, 3);
         validate_get_assertion_options(map_map(&request, 5))?;
         validate_credential_descriptor_list(allow_list)?;
@@ -709,7 +709,23 @@ fn allow_list_allows(allow_list: Option<&[Value]>, credential_id: &[u8]) -> bool
         return true;
     };
 
+    if allow_list.is_empty() {
+        return true;
+    }
+
     credential_descriptor_list_contains(allow_list, credential_id)
+}
+
+fn validate_client_data_hash(client_data_hash: &[u8]) -> Result<(), ErrorStatus> {
+    if client_data_hash.len() != 32 {
+        log::info!(
+            "request provided invalid clientDataHash length {}; expected 32 bytes",
+            client_data_hash.len()
+        );
+        return Err(ErrorStatus::InvalidCbor);
+    }
+
+    Ok(())
 }
 
 fn matching_credential_indexes(
@@ -943,8 +959,13 @@ mod tests {
     }
 
     #[test]
-    fn allow_list_empty_or_non_matching_rejects_credential() {
-        assert!(!allow_list_allows(Some(&[]), &[1, 2, 3, 4]));
+    fn allow_list_absent_or_empty_allows_any_credential() {
+        assert!(allow_list_allows(Some(&[]), &[1, 2, 3, 4]));
+        assert!(allow_list_allows(None, &[1, 2, 3, 4]));
+    }
+
+    #[test]
+    fn allow_list_non_matching_rejects_credential() {
         assert!(!allow_list_allows(
             Some(&[credential_descriptor(vec![9, 9, 9, 9])]),
             &[1, 2, 3, 4]
@@ -1125,6 +1146,71 @@ mod tests {
                     Value::Integer(3.into()),
                     Value::Array(vec![Value::Text("bad-entry".to_owned())]),
                 ),
+            ]),
+        );
+        assert_eq!(authenticator.handle_cbor(&get_assertion)[0], 0x12);
+    }
+
+    #[test]
+    fn empty_allow_list_matches_discoverable_credentials() {
+        let mut authenticator = authenticator_with_credential("example.com", vec![1, 2, 3, 4]);
+
+        let response = authenticator.handle_cbor(&ctap_request(
+            CMD_AUTHENTICATOR_GET_ASSERTION,
+            Value::Map(vec![
+                (
+                    Value::Integer(1.into()),
+                    Value::Text("example.com".to_owned()),
+                ),
+                (Value::Integer(2.into()), Value::Bytes(vec![0xaa; 32])),
+                (Value::Integer(3.into()), Value::Array(Vec::new())),
+            ]),
+        ));
+
+        assert_eq!(response[0], 0x00);
+    }
+
+    #[test]
+    fn client_data_hash_must_be_32_bytes() {
+        let mut authenticator = Authenticator::default();
+
+        let make_credential = ctap_request(
+            CMD_AUTHENTICATOR_MAKE_CREDENTIAL,
+            Value::Map(vec![
+                (Value::Integer(1.into()), Value::Bytes(vec![0xaa; 31])),
+                (
+                    Value::Integer(2.into()),
+                    Value::Map(vec![(
+                        Value::Text("id".to_owned()),
+                        Value::Text("example.com".to_owned()),
+                    )]),
+                ),
+                (
+                    Value::Integer(3.into()),
+                    Value::Map(vec![(Value::Text("id".to_owned()), Value::Bytes(vec![1]))]),
+                ),
+                (
+                    Value::Integer(4.into()),
+                    Value::Array(vec![Value::Map(vec![
+                        (
+                            Value::Text("type".to_owned()),
+                            Value::Text("public-key".to_owned()),
+                        ),
+                        (Value::Text("alg".to_owned()), Value::Integer((-7).into())),
+                    ])]),
+                ),
+            ]),
+        );
+        assert_eq!(authenticator.handle_cbor(&make_credential)[0], 0x12);
+
+        let get_assertion = ctap_request(
+            CMD_AUTHENTICATOR_GET_ASSERTION,
+            Value::Map(vec![
+                (
+                    Value::Integer(1.into()),
+                    Value::Text("example.com".to_owned()),
+                ),
+                (Value::Integer(2.into()), Value::Bytes(vec![0xaa; 33])),
             ]),
         );
         assert_eq!(authenticator.handle_cbor(&get_assertion)[0], 0x12);

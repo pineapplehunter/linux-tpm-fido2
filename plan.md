@@ -38,13 +38,13 @@
 - [x] Holistic NixOS test boots a VM, starts the daemon, provisions a virtual TPM, completes register/assert, and verifies restart against the same SQLite store and TPM state.
 - [x] treefmt-nix is wired in for `nix fmt` with `nixfmt`, `rustfmt`, and `taplo`.
 - [x] Recovery slots can be generated during registration from `LINUX_TPM_FIDO2_RECOVERY_PASSPHRASE` and are persisted with the credential.
+- [x] CTAP2 request handling accepts empty `allowCredentials` for discoverable passkey flows and rejects malformed `clientDataHash` lengths early.
 
 ## In Progress
 
-- [ ] Improve CTAP2 request handling for browser edge cases.
-
 ## Next
 
+- [ ] Improve CTAP2 request handling for browser edge cases.
 - [ ] Evolve the SQLite schema toward LUKS2-style metadata, tokens, and keyslots.
 - [ ] Decide the daemon/user-session model before GTK work.
 - [ ] Add GTK approval and settings UI after transport, TPM, and storage are stable.
