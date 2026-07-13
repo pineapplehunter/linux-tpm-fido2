@@ -5,7 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{approval, store, tpm};
+use crate::{approval, session, store, tpm};
 use ciborium::value::Value;
 use sha2::{Digest, Sha256};
 
@@ -43,6 +43,7 @@ pub struct Authenticator {
     store_dir: PathBuf,
     tpm_path: Option<PathBuf>,
     tpm: Option<tpm::Tpm>,
+    session: session::SessionContext,
     credentials: Vec<Credential>,
     recent_assertion_approval: Option<RecentAssertionApproval>,
     pending_assertion: Option<PendingAssertion>,
@@ -74,6 +75,7 @@ struct Credential {
 
 impl Authenticator {
     pub fn new(store_dir: PathBuf, tpm_path: Option<PathBuf>) -> Self {
+        let session = session::SessionContext::detect();
         let tpm = None;
         let credentials = match store::load_ctap2_credentials_from_dir(&store_dir) {
             Ok(credentials) => credentials
@@ -106,6 +108,7 @@ impl Authenticator {
             store_dir,
             tpm_path,
             tpm,
+            session,
             credentials,
             recent_assertion_approval: None,
             pending_assertion: None,
@@ -155,11 +158,14 @@ impl Authenticator {
             return Err(ErrorStatus::CredentialExcluded);
         }
 
-        if !approval::approve(&format!(
-            "Register a new passkey for {} as {}",
-            rp_id,
-            user_display_name.or(user_name).unwrap_or("unknown user")
-        )) {
+        if !approval::approve(
+            &format!(
+                "Register a new passkey for {} as {}",
+                rp_id,
+                user_display_name.or(user_name).unwrap_or("unknown user")
+            ),
+            &self.session,
+        ) {
             return Err(ErrorStatus::OperationDenied);
         }
 
@@ -504,7 +510,10 @@ impl Authenticator {
             return true;
         }
 
-        if !approval::approve(&format!("Authenticate with passkey for {rp_id}")) {
+        if !approval::approve(
+            &format!("Authenticate with passkey for {rp_id}"),
+            &self.session,
+        ) {
             self.recent_assertion_approval = None;
             return false;
         }
@@ -1251,6 +1260,16 @@ mod tests {
             store_dir,
             tpm_path: None,
             tpm: None,
+            session: session::SessionContext {
+                model: session::DaemonSessionModel::ActiveGraphicalSession,
+                user: Some("test-user".to_owned()),
+                uid: Some(1000),
+                session_id: Some("test-session".to_owned()),
+                seat: Some("seat0".to_owned()),
+                display: Some(":0".to_owned()),
+                wayland_display: None,
+                dbus_session_bus_address: None,
+            },
             credentials: credentials
                 .into_iter()
                 .map(|credential| Credential {

@@ -9,6 +9,7 @@ The goal is to let browsers use TPM-protected credentials through the normal FID
 - Expose a browser-usable FIDO2 authenticator backed by TPM 2.0 keys.
 - Support credentials bound to TPM PCR policy, starting with secure boot state and allowing additional PCR selections later.
 - Support passphrase-based recovery for credentials using TPM-bound material that is not PCR-bound.
+- Route approval prompts through the active graphical session while the daemon remains a single system service.
 - Show a GTK approval prompt for authentication requests with accept/reject actions.
 - Provide a GTK settings UI for stored passkey IDs and recovery passphrase configuration.
 - Store credential metadata using a LUKS2-inspired design: structured metadata, keyslots, tokens, and clear separation between encrypted secrets and unlock mechanisms.
@@ -19,6 +20,7 @@ The goal is to let browsers use TPM-protected credentials through the normal FID
 - The daemon implements CTAP2/WebAuthn authenticator operations and delegates credential signing or unsealing to TPM 2.0.
 - A local GTK agent handles user presence/user verification prompts and settings.
 - Metadata stores public credential data, TPM public/private blobs, PCR policy description, recovery slots, and UI-facing labels.
+- The current daemon model is a system daemon that records the active session identity at startup and uses it to scope approval prompts.
 
 ## Development
 
@@ -48,4 +50,4 @@ The daemon currently accepts `--uhid-path`, `--tpm-path`, `--store-dir`, and `--
 
 The daemon can create a UHID-backed FIDO HID device, handle CTAPHID `INIT`, `PING`, `CBOR`, `WINK`, and `CANCEL`, and implement CTAP2 `authenticatorGetInfo`, `authenticatorMakeCredential`, and `authenticatorGetAssertion`.
 
-CTAP2 credentials are TPM-backed P-256 ECDSA keys persisted in a normalized SQLite store with separate metadata, keyslot, and token tables managed by `sqlx` migrations. Secure-boot PCR binding is wired for credential creation and assertion; recovery slots can now be generated during registration with `LINUX_TPM_FIDO2_RECOVERY_PASSPHRASE`, while production metadata durability and GUI are still pending.
+CTAP2 credentials are TPM-backed P-256 ECDSA keys persisted in a normalized SQLite store with separate metadata, keyslot, and token tables managed by `sqlx` migrations. Secure-boot PCR binding is wired for credential creation and assertion; recovery slots can now be generated during registration with `LINUX_TPM_FIDO2_RECOVERY_PASSPHRASE`, and approval prompts are scoped to the active graphical session while production metadata durability and GUI are still pending.

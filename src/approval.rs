@@ -1,10 +1,16 @@
 use std::io::{self, Write};
 
-pub fn approve(prompt: &str) -> bool {
+use crate::session;
+
+pub fn approve(prompt: &str, session: &session::SessionContext) -> bool {
     let mut stdout = io::stdout();
-    if write!(stdout, "{prompt}? [y/N] ")
-        .and_then(|_| stdout.flush())
-        .is_err()
+    if write!(
+        stdout,
+        "[{session}] {prompt}? [y/N] ",
+        session = session.describe()
+    )
+    .and_then(|_| stdout.flush())
+    .is_err()
     {
         return false;
     }

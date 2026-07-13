@@ -40,13 +40,13 @@
 - [x] Recovery slots can be generated during registration from `LINUX_TPM_FIDO2_RECOVERY_PASSPHRASE` and are persisted with the credential.
 - [x] CTAP2 request handling accepts empty `allowCredentials` for discoverable passkey flows and rejects malformed `clientDataHash` lengths early.
 - [x] SQLite storage now uses normalized metadata, keyslot, and token tables for CTAP2 credentials.
+- [x] Daemon/user-session model is now explicit: a system daemon routes approvals against the active graphical session and logs session identity at startup.
 
 ## In Progress
 
 ## Next
 
 - [ ] Improve CTAP2 request handling for browser edge cases.
-- [ ] Decide the daemon/user-session model before GTK work.
 - [ ] Add GTK approval and settings UI after transport, TPM, and storage are stable.
 
 ## Architecture Direction
@@ -59,9 +59,7 @@
 
 ## Open Design Questions
 
-- Per-user credential binding needs a deliberate design. A system daemon receiving raw HID traffic does not automatically know which Unix user or browser process initiated a CTAP request.
-- Possible user-binding designs include a per-user daemon that creates a per-session virtual authenticator, a privileged system broker with per-user/session helpers, or a system daemon that routes requests to the active graphical session for approval and credential namespace selection.
-- The service model should avoid making all users share one credential namespace unless that is explicitly intended.
+- The daemon should continue avoiding accidental cross-user credential sharing as GTK and session helpers are added.
 - TPM-backed credential storage currently uses one TPM child key per credential; the production parent/policy model still needs a deliberate design.
 
 ## Non-Goals For Now
