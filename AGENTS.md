@@ -13,7 +13,7 @@
 - Secure-boot PCR binding is wired into the current credential create/assert flow; configurable PCR selections still need follow-up work.
 - Recovery uses passphrase-unlocked material that remains TPM-bound but is not PCR-bound; the current path is env-controlled until GTK settings exist.
 - Planned UI is GTK: an authentication approval prompt plus a settings UI for passkey IDs and recovery passphrases.
-- Credential storage should take design cues from LUKS2 metadata: structured metadata, keyslots/tokens, and separation of encrypted secrets from unlock mechanisms.
+- Credential storage now uses normalized metadata, keyslot, and token tables as a LUKS2-style step toward structured unlock mechanisms and separated secrets.
 
 ## Nix Workflow
 

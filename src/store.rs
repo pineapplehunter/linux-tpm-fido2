@@ -10,7 +10,7 @@ use color_eyre::{
     eyre::{WrapErr, eyre},
 };
 use sqlx::{
-    SqlitePool,
+    Row, SqlitePool,
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
 };
 
@@ -104,15 +104,23 @@ async fn load_ctap2_credentials_async(dir: &Path) -> Result<Vec<StoredCtap2Crede
     }
 
     let pool = open_database(dir).await?;
-    let rows = sqlx::query!(
-        "SELECT c.credential_id, c.rp_id, c.user_handle, c.user_name, c.user_display_name, \
-                c.sign_count, c.policy_selection, c.policy_digest, \
-                c.recovery_label, c.recovery_passphrase_salt, c.recovery_passphrase_hash, \
-                c.recovery_tpm_private, c.recovery_tpm_public, c.recovery_public_key_x, c.recovery_public_key_y, \
-                k.tpm_private, k.tpm_public, k.public_key_x, k.public_key_y \
-         FROM credentials c \
-         JOIN tpm_keys k ON k.credential_id = c.credential_id \
-         ORDER BY c.rp_id, c.credential_id"
+    let rows = sqlx::query(
+        "SELECT m.credential_id, m.rp_id, m.user_handle, m.user_name, m.user_display_name, \
+                m.sign_count, \
+                p.policy_selection, p.policy_digest, \
+                p.tpm_private AS primary_tpm_private, p.tpm_public AS primary_tpm_public, \
+                p.public_key_x AS primary_public_key_x, p.public_key_y AS primary_public_key_y, \
+                r.slot_label AS recovery_label, \
+                r.tpm_private AS recovery_tpm_private, r.tpm_public AS recovery_tpm_public, \
+                r.public_key_x AS recovery_public_key_x, r.public_key_y AS recovery_public_key_y, \
+                t.passphrase_salt, t.passphrase_hash \
+         FROM credential_metadata m \
+         JOIN credential_keyslots p \
+           ON p.credential_id = m.credential_id AND p.slot_kind = 'primary' \
+         LEFT JOIN credential_keyslots r \
+           ON r.credential_id = m.credential_id AND r.slot_kind = 'recovery' \
+         LEFT JOIN credential_tokens t ON t.keyslot_id = r.keyslot_id \
+         ORDER BY m.rp_id, m.credential_id",
     )
     .fetch_all(&pool)
     .await
@@ -120,30 +128,41 @@ async fn load_ctap2_credentials_async(dir: &Path) -> Result<Vec<StoredCtap2Crede
 
     rows.into_iter()
         .map(|row| {
+            let sign_count: i64 = row.try_get("sign_count")?;
+            let policy_selection: Option<String> = row.try_get("policy_selection")?;
+            let policy_digest: Option<Vec<u8>> = row.try_get("policy_digest")?;
+            let recovery_label: Option<String> = row.try_get("recovery_label")?;
+            let recovery_passphrase_salt: Option<Vec<u8>> = row.try_get("passphrase_salt")?;
+            let recovery_passphrase_hash: Option<Vec<u8>> = row.try_get("passphrase_hash")?;
+            let recovery_private: Option<Vec<u8>> = row.try_get("recovery_tpm_private")?;
+            let recovery_public: Option<Vec<u8>> = row.try_get("recovery_tpm_public")?;
+            let recovery_public_key_x: Option<Vec<u8>> = row.try_get("recovery_public_key_x")?;
+            let recovery_public_key_y: Option<Vec<u8>> = row.try_get("recovery_public_key_y")?;
+
             Ok(StoredCtap2Credential {
-                id: row.credential_id,
-                rp_id: row.rp_id,
-                user_handle: row.user_handle,
-                user_name: row.user_name,
-                user_display_name: row.user_display_name,
+                id: row.try_get("credential_id")?,
+                rp_id: row.try_get("rp_id")?,
+                user_handle: row.try_get("user_handle")?,
+                user_name: row.try_get("user_name")?,
+                user_display_name: row.try_get("user_display_name")?,
                 key: StoredTpmKey {
-                    private: row.tpm_private,
-                    public: row.tpm_public,
-                    public_key_x: row.public_key_x,
-                    public_key_y: row.public_key_y,
+                    private: row.try_get("primary_tpm_private")?,
+                    public: row.try_get("primary_tpm_public")?,
+                    public_key_x: row.try_get("primary_public_key_x")?,
+                    public_key_y: row.try_get("primary_public_key_y")?,
                 },
-                policy: match (row.policy_selection, row.policy_digest) {
+                policy: match (policy_selection, policy_digest) {
                     (Some(selection), Some(digest)) => Some(StoredPcrPolicy { selection, digest }),
                     _ => None,
                 },
                 recovery: match (
-                    row.recovery_label,
-                    row.recovery_passphrase_salt,
-                    row.recovery_passphrase_hash,
-                    row.recovery_tpm_private,
-                    row.recovery_tpm_public,
-                    row.recovery_public_key_x,
-                    row.recovery_public_key_y,
+                    recovery_label,
+                    recovery_passphrase_salt,
+                    recovery_passphrase_hash,
+                    recovery_private,
+                    recovery_public,
+                    recovery_public_key_x,
+                    recovery_public_key_y,
                 ) {
                     (
                         label,
@@ -166,8 +185,8 @@ async fn load_ctap2_credentials_async(dir: &Path) -> Result<Vec<StoredCtap2Crede
                     }),
                     _ => None,
                 },
-                sign_count: u32::try_from(row.sign_count)
-                    .wrap_err_with(|| format!("invalid sign_count {}", row.sign_count))?,
+                sign_count: u32::try_from(sign_count)
+                    .wrap_err_with(|| format!("invalid sign_count {}", sign_count))?,
             })
         })
         .collect()
@@ -180,55 +199,72 @@ async fn save_ctap2_credentials_async(
     let pool = open_database(dir).await?;
     let mut tx = pool.begin().await.wrap_err("beginning store transaction")?;
 
-    sqlx::query("DELETE FROM tpm_keys")
-        .execute(&mut *tx)
-        .await
-        .wrap_err("clearing TPM key rows")?;
-    sqlx::query("DELETE FROM credentials")
+    sqlx::query("DELETE FROM credential_metadata")
         .execute(&mut *tx)
         .await
         .wrap_err("clearing credential rows")?;
 
     for credential in credentials {
-        sqlx::query!(
-            "INSERT INTO credentials \
-             (credential_id, rp_id, user_handle, user_name, user_display_name, sign_count, \
-              policy_selection, policy_digest, recovery_label, recovery_passphrase_salt, recovery_passphrase_hash, \
-              recovery_tpm_private, recovery_tpm_public, recovery_public_key_x, recovery_public_key_y) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
-            &credential.id,
-            &credential.rp_id,
-            &credential.user_handle,
-            credential.user_name.as_deref(),
-            credential.user_display_name.as_deref(),
-            i64::from(credential.sign_count),
-            credential.policy.as_ref().map(|policy| policy.selection.as_str()),
-            credential.policy.as_ref().map(|policy| policy.digest.as_slice()),
-            credential.recovery.as_ref().and_then(|recovery| recovery.label.as_deref()),
-            credential.recovery.as_ref().map(|recovery| recovery.passphrase_salt.as_slice()),
-            credential.recovery.as_ref().map(|recovery| recovery.passphrase_hash.as_slice()),
-            credential.recovery.as_ref().map(|recovery| recovery.key.private.as_slice()),
-            credential.recovery.as_ref().map(|recovery| recovery.key.public.as_slice()),
-            credential.recovery.as_ref().map(|recovery| recovery.key.public_key_x.as_slice()),
-            credential.recovery.as_ref().map(|recovery| recovery.key.public_key_y.as_slice()),
+        sqlx::query(
+            "INSERT INTO credential_metadata \
+             (credential_id, rp_id, user_handle, user_name, user_display_name, sign_count) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         )
+        .bind(&credential.id)
+        .bind(&credential.rp_id)
+        .bind(&credential.user_handle)
+        .bind(credential.user_name.as_deref())
+        .bind(credential.user_display_name.as_deref())
+        .bind(i64::from(credential.sign_count))
         .execute(&mut *tx)
         .await
-        .wrap_err_with(|| format!("saving credential for rp_id={}", credential.rp_id))?;
+        .wrap_err_with(|| format!("saving credential metadata for rp_id={}", credential.rp_id))?;
 
-        sqlx::query!(
-            "INSERT INTO tpm_keys \
-             (credential_id, tpm_private, tpm_public, public_key_x, public_key_y) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            &credential.id,
-            &credential.key.private,
-            &credential.key.public,
-            &credential.key.public_key_x,
-            &credential.key.public_key_y,
+        sqlx::query(
+            "INSERT INTO credential_keyslots \
+             (credential_id, slot_kind, slot_label, policy_selection, policy_digest, tpm_private, tpm_public, public_key_x, public_key_y) \
+             VALUES (?1, 'primary', NULL, ?2, ?3, ?4, ?5, ?6, ?7)",
         )
+        .bind(&credential.id)
+        .bind(credential.policy.as_ref().map(|policy| policy.selection.as_str()))
+        .bind(credential.policy.as_ref().map(|policy| policy.digest.as_slice()))
+        .bind(&credential.key.private)
+        .bind(&credential.key.public)
+        .bind(&credential.key.public_key_x)
+        .bind(&credential.key.public_key_y)
         .execute(&mut *tx)
         .await
-        .wrap_err_with(|| format!("saving TPM key for rp_id={}", credential.rp_id))?;
+        .wrap_err_with(|| format!("saving primary keyslot for rp_id={}", credential.rp_id))?;
+
+        if let Some(recovery) = &credential.recovery {
+            let recovery_keyslot = sqlx::query(
+                "INSERT INTO credential_keyslots \
+                 (credential_id, slot_kind, slot_label, policy_selection, policy_digest, tpm_private, tpm_public, public_key_x, public_key_y) \
+                 VALUES (?1, 'recovery', ?2, NULL, NULL, ?3, ?4, ?5, ?6)",
+            )
+            .bind(&credential.id)
+            .bind(recovery.label.as_deref())
+            .bind(&recovery.key.private)
+            .bind(&recovery.key.public)
+            .bind(&recovery.key.public_key_x)
+            .bind(&recovery.key.public_key_y)
+            .execute(&mut *tx)
+            .await
+            .wrap_err_with(|| format!("saving recovery keyslot for rp_id={}", credential.rp_id))?;
+
+            sqlx::query(
+                "INSERT INTO credential_tokens \
+                 (keyslot_id, token_type, label, passphrase_salt, passphrase_hash) \
+                 VALUES (?1, 'passphrase', ?2, ?3, ?4)",
+            )
+            .bind(recovery_keyslot.last_insert_rowid())
+            .bind(recovery.label.as_deref())
+            .bind(recovery.passphrase_salt.as_slice())
+            .bind(recovery.passphrase_hash.as_slice())
+            .execute(&mut *tx)
+            .await
+            .wrap_err_with(|| format!("saving recovery token for rp_id={}", credential.rp_id))?;
+        }
     }
 
     tx.commit()
@@ -242,13 +278,13 @@ async fn update_ctap2_sign_count_async(
     sign_count: u32,
 ) -> Result<()> {
     let pool = open_database(dir).await?;
-    let result = sqlx::query!(
-        "UPDATE credentials \
+    let result = sqlx::query(
+        "UPDATE credential_metadata \
          SET sign_count = ?1, updated_at = CURRENT_TIMESTAMP \
          WHERE credential_id = ?2",
-        i64::from(sign_count),
-        credential_id,
     )
+    .bind(i64::from(sign_count))
+    .bind(credential_id)
     .execute(&pool)
     .await
     .wrap_err("updating CTAP2 credential sign_count")?;
@@ -331,8 +367,21 @@ mod tests {
                 public_key_x: vec![13; 32],
                 public_key_y: vec![14; 32],
             },
-            policy: None,
-            recovery: None,
+            policy: Some(StoredPcrPolicy {
+                selection: "sha256:7".to_owned(),
+                digest: vec![15; 32],
+            }),
+            recovery: Some(StoredRecoverySlot {
+                label: Some("backup".to_owned()),
+                passphrase_salt: vec![16; 32],
+                passphrase_hash: vec![17; 32],
+                key: StoredTpmKey {
+                    private: vec![18, 19],
+                    public: vec![20, 21],
+                    public_key_x: vec![22; 32],
+                    public_key_y: vec![23; 32],
+                },
+            }),
             sign_count: 10,
         }];
 
