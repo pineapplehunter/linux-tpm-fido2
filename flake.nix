@@ -32,6 +32,7 @@
             packages = with pkgs; [
               pkg-config
               rustPlatform.bindgenHook
+              sqlx-cli
               (rust-bin.stable.latest.default.override {
                 extensions = [
                   "rust-src"

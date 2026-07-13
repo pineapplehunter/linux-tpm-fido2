@@ -1,6 +1,11 @@
+use std::{
+    path::PathBuf,
+    time::{Duration, Instant},
+};
+
+use crate::{approval, store};
 use ciborium::value::Value;
 use p256::ecdsa::{Signature, SigningKey, signature::Signer};
-use rand_core::{OsRng, RngCore};
 use sha2::{Digest, Sha256};
 
 pub const CMD_AUTHENTICATOR_MAKE_CREDENTIAL: u8 = 0x01;
@@ -12,16 +17,24 @@ const CTAP1_ERR_INVALID_COMMAND: u8 = 0x01;
 const CTAP2_ERR_INVALID_CBOR: u8 = 0x12;
 const CTAP2_ERR_MISSING_PARAMETER: u8 = 0x14;
 const CTAP2_ERR_UNSUPPORTED_ALGORITHM: u8 = 0x26;
+const CTAP2_ERR_OPERATION_DENIED: u8 = 0x27;
 const CTAP2_ERR_NO_CREDENTIALS: u8 = 0x2e;
 
 const COSE_ALG_ES256: i64 = -7;
+const ASSERTION_APPROVAL_GRACE: Duration = Duration::from_secs(10);
 pub const AAGUID: [u8; 16] = [
     0x6c, 0x74, 0x70, 0x6d, 0xf1, 0xd0, 0x42, 0x00, 0x80, 0x01, 0x54, 0x50, 0x4d, 0x46, 0x49, 0x44,
 ];
 
-#[derive(Default)]
 pub struct Authenticator {
+    store_dir: PathBuf,
     credentials: Vec<Credential>,
+    recent_assertion_approval: Option<RecentAssertionApproval>,
+}
+
+struct RecentAssertionApproval {
+    rp_id: String,
+    expires_at: Instant,
 }
 
 struct Credential {
@@ -35,6 +48,44 @@ struct Credential {
 }
 
 impl Authenticator {
+    pub fn new(store_dir: PathBuf) -> Self {
+        let credentials = match store::load_ctap2_credentials_from_dir(&store_dir) {
+            Ok(credentials) => credentials
+                .into_iter()
+                .filter_map(
+                    |credential| match SigningKey::from_slice(&credential.private_key) {
+                        Ok(signing_key) => Some(Credential {
+                            id: credential.id,
+                            rp_id: credential.rp_id,
+                            user_handle: credential.user_handle,
+                            user_name: credential.user_name,
+                            user_display_name: credential.user_display_name,
+                            signing_key,
+                            sign_count: credential.sign_count,
+                        }),
+                        Err(error) => {
+                            log::warn!(
+                                "skipping stored CTAP2 credential with invalid key: {error}"
+                            );
+                            None
+                        }
+                    },
+                )
+                .collect(),
+            Err(error) => {
+                log::warn!("failed to load CTAP2 credential store: {error:?}");
+                Vec::new()
+            }
+        };
+        log::info!("loaded {} software CTAP2 credentials", credentials.len());
+
+        Self {
+            store_dir,
+            credentials,
+            recent_assertion_approval: None,
+        }
+    }
+
     pub fn handle_cbor(&mut self, payload: &[u8]) -> Vec<u8> {
         let Some((&command, body)) = payload.split_first() else {
             return vec![CTAP1_ERR_INVALID_COMMAND];
@@ -79,22 +130,33 @@ impl Authenticator {
         let Some(user_handle) = map_bytes(user, "id") else {
             return vec![CTAP2_ERR_MISSING_PARAMETER];
         };
+        let user_name = map_text(user, "name");
+        let user_display_name = map_text(user, "displayName");
 
-        let signing_key = SigningKey::random(&mut OsRng);
+        if !approval::approve(&format!(
+            "Register a new passkey for {} as {}",
+            rp_id,
+            user_display_name.or(user_name).unwrap_or("unknown user")
+        )) {
+            return vec![CTAP2_ERR_OPERATION_DENIED];
+        }
+
+        let signing_key = random_signing_key();
         let public_key = cose_public_key(&signing_key);
         let mut credential_id = vec![0u8; 32];
-        OsRng.fill_bytes(&mut credential_id);
+        fill_random(&mut credential_id);
 
         let auth_data = make_auth_data(rp_id, 0x41, 0, Some((&credential_id, &public_key)));
         self.credentials.push(Credential {
             id: credential_id,
             rp_id: rp_id.to_owned(),
             user_handle: user_handle.to_vec(),
-            user_name: map_text(user, "name").map(str::to_owned),
-            user_display_name: map_text(user, "displayName").map(str::to_owned),
+            user_name: user_name.map(str::to_owned),
+            user_display_name: user_display_name.map(str::to_owned),
             signing_key,
             sign_count: 0,
         });
+        self.save_credentials();
 
         log::info!(
             "created software credential rp_id={} total_credentials={}",
@@ -123,59 +185,124 @@ impl Authenticator {
         };
         let allow_list = map_array(&request, 3);
 
-        let Some(credential) = self.credentials.iter_mut().find(|credential| {
+        let Some(credential_index) = self.credentials.iter().position(|credential| {
             credential.rp_id == rp_id && allow_list_matches(allow_list, &credential.id)
         }) else {
             return vec![CTAP2_ERR_NO_CREDENTIALS];
         };
 
-        credential.sign_count = credential.sign_count.saturating_add(1);
-        let auth_data = make_auth_data(&credential.rp_id, 0x01, credential.sign_count, None);
-        let mut signed_data = auth_data.clone();
-        signed_data.extend_from_slice(client_data_hash);
-        let signature: Signature = credential.signing_key.sign(&signed_data);
-
-        let mut user = vec![(
-            Value::Text("id".to_owned()),
-            Value::Bytes(credential.user_handle.clone()),
-        )];
-        if let Some(name) = &credential.user_name {
-            user.push((Value::Text("name".to_owned()), Value::Text(name.clone())));
-        }
-        if let Some(display_name) = &credential.user_display_name {
-            user.push((
-                Value::Text("displayName".to_owned()),
-                Value::Text(display_name.clone()),
-            ));
+        if !self.assertion_approved(rp_id) {
+            return vec![CTAP2_ERR_OPERATION_DENIED];
         }
 
-        log::info!(
-            "asserting software credential rp_id={} sign_count={}",
-            credential.rp_id,
-            credential.sign_count
-        );
+        let response = {
+            let credential = &mut self.credentials[credential_index];
+            credential.sign_count = credential.sign_count.saturating_add(1);
+            let auth_data = make_auth_data(&credential.rp_id, 0x01, credential.sign_count, None);
+            let mut signed_data = auth_data.clone();
+            signed_data.extend_from_slice(client_data_hash);
+            let signature: Signature = credential.signing_key.sign(&signed_data);
 
-        encode_response(Value::Map(vec![
-            (
-                Value::Integer(1.into()),
-                Value::Map(vec![
-                    (
-                        Value::Text("type".to_owned()),
-                        Value::Text("public-key".to_owned()),
-                    ),
-                    (
-                        Value::Text("id".to_owned()),
-                        Value::Bytes(credential.id.clone()),
-                    ),
-                ]),
-            ),
-            (Value::Integer(2.into()), Value::Bytes(auth_data)),
-            (
-                Value::Integer(3.into()),
-                Value::Bytes(signature.to_der().as_bytes().to_vec()),
-            ),
-            (Value::Integer(4.into()), Value::Map(user)),
-        ]))
+            let mut user = vec![(
+                Value::Text("id".to_owned()),
+                Value::Bytes(credential.user_handle.clone()),
+            )];
+            if let Some(name) = &credential.user_name {
+                user.push((Value::Text("name".to_owned()), Value::Text(name.clone())));
+            }
+            if let Some(display_name) = &credential.user_display_name {
+                user.push((
+                    Value::Text("displayName".to_owned()),
+                    Value::Text(display_name.clone()),
+                ));
+            }
+
+            log::info!(
+                "asserting software credential rp_id={} sign_count={}",
+                credential.rp_id,
+                credential.sign_count
+            );
+
+            encode_response(Value::Map(vec![
+                (
+                    Value::Integer(1.into()),
+                    Value::Map(vec![
+                        (
+                            Value::Text("type".to_owned()),
+                            Value::Text("public-key".to_owned()),
+                        ),
+                        (
+                            Value::Text("id".to_owned()),
+                            Value::Bytes(credential.id.clone()),
+                        ),
+                    ]),
+                ),
+                (Value::Integer(2.into()), Value::Bytes(auth_data)),
+                (
+                    Value::Integer(3.into()),
+                    Value::Bytes(signature.to_der().as_bytes().to_vec()),
+                ),
+                (Value::Integer(4.into()), Value::Map(user)),
+            ]))
+        };
+        self.save_credentials();
+        response
+    }
+
+    fn save_credentials(&self) {
+        let credentials: Vec<_> = self
+            .credentials
+            .iter()
+            .map(|credential| store::StoredCtap2Credential {
+                id: credential.id.clone(),
+                rp_id: credential.rp_id.clone(),
+                user_handle: credential.user_handle.clone(),
+                user_name: credential.user_name.clone(),
+                user_display_name: credential.user_display_name.clone(),
+                private_key: credential.signing_key.to_bytes().to_vec(),
+                sign_count: credential.sign_count,
+            })
+            .collect();
+
+        let path = store::ctap2_credentials_path_in_dir(&self.store_dir);
+        if let Err(error) = store::save_ctap2_credentials_to_dir(&self.store_dir, &credentials) {
+            log::warn!("failed to save CTAP2 credential store: {error:?}");
+        } else {
+            log::info!(
+                "saved {} software CTAP2 credentials to {}",
+                credentials.len(),
+                path.display()
+            );
+        }
+    }
+
+    fn assertion_approved(&mut self, rp_id: &str) -> bool {
+        let now = Instant::now();
+        if self
+            .recent_assertion_approval
+            .as_ref()
+            .is_some_and(|approval| approval.rp_id == rp_id && approval.expires_at > now)
+        {
+            log::info!("reusing recent assertion approval for rp_id={rp_id}");
+            return true;
+        }
+
+        if !approval::approve(&format!("Authenticate with passkey for {rp_id}")) {
+            self.recent_assertion_approval = None;
+            return false;
+        }
+
+        self.recent_assertion_approval = Some(RecentAssertionApproval {
+            rp_id: rp_id.to_owned(),
+            expires_at: now + ASSERTION_APPROVAL_GRACE,
+        });
+        true
+    }
+}
+
+impl Default for Authenticator {
+    fn default() -> Self {
+        Self::new(store::dev_store_dir())
     }
 }
 
@@ -328,7 +455,7 @@ fn make_auth_data(
 }
 
 fn cose_public_key(signing_key: &SigningKey) -> Value {
-    let encoded = signing_key.verifying_key().to_encoded_point(false);
+    let encoded = signing_key.verifying_key().to_sec1_point(false);
     let x = encoded.x().expect("P-256 x coordinate").to_vec();
     let y = encoded.y().expect("P-256 y coordinate").to_vec();
 
@@ -342,6 +469,20 @@ fn cose_public_key(signing_key: &SigningKey) -> Value {
         (Value::Integer((-2).into()), Value::Bytes(x)),
         (Value::Integer((-3).into()), Value::Bytes(y)),
     ])
+}
+
+fn random_signing_key() -> SigningKey {
+    loop {
+        let mut private_key = [0u8; 32];
+        fill_random(&mut private_key);
+        if let Ok(signing_key) = SigningKey::from_slice(&private_key) {
+            return signing_key;
+        }
+    }
+}
+
+fn fill_random(bytes: &mut [u8]) {
+    getrandom::fill(bytes).expect("kernel random source available");
 }
 
 fn encode_response(response: Value) -> Vec<u8> {

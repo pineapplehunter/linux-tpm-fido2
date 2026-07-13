@@ -1,9 +1,8 @@
-use std::io::{self, Write};
+use std::path::PathBuf;
 
-use crate::{ctap2, hid::REPORT_SIZE, store};
-use p256::ecdsa::{signature::Signer, Signature, SigningKey};
-use rand_core::{OsRng, RngCore};
-use rcgen::{generate_simple_self_signed, CertifiedKey, KeyPair, SigningKey as RcgenSigningKey};
+use crate::{approval, ctap2, hid::REPORT_SIZE, store};
+use p256::ecdsa::{Signature, SigningKey, signature::Signer};
+use rcgen::{CertifiedKey, KeyPair, SigningKey as RcgenSigningKey, generate_simple_self_signed};
 
 pub const BROADCAST_CID: u32 = 0xffff_ffff;
 
@@ -39,6 +38,7 @@ pub struct PacketHandler {
 }
 
 struct U2fAuthenticator {
+    store_dir: PathBuf,
     attestation_cert_der: Vec<u8>,
     attestation_key: KeyPair,
     credentials: Vec<U2fCredential>,
@@ -53,10 +53,16 @@ struct U2fCredential {
 
 impl Default for U2fAuthenticator {
     fn default() -> Self {
+        Self::new(store::dev_store_dir())
+    }
+}
+
+impl U2fAuthenticator {
+    fn new(store_dir: PathBuf) -> Self {
         let CertifiedKey { cert, signing_key } =
             generate_simple_self_signed(["linux-tpm-fido2.local".to_owned()])
                 .expect("generate development U2F attestation certificate");
-        let credentials = match store::load_u2f_credentials() {
+        let credentials = match store::load_u2f_credentials_from_dir(&store_dir) {
             Ok(credentials) => credentials
                 .into_iter()
                 .filter_map(
@@ -82,6 +88,7 @@ impl Default for U2fAuthenticator {
         log::info!("loaded {} software U2F credentials", credentials.len());
 
         Self {
+            store_dir,
             attestation_cert_der: cert.der().as_ref().to_vec(),
             attestation_key: signing_key,
             credentials,
@@ -105,6 +112,14 @@ pub enum PacketOutcome {
 }
 
 impl PacketHandler {
+    pub fn new(store_dir: PathBuf) -> Self {
+        Self {
+            pending: None,
+            authenticator: ctap2::Authenticator::new(store_dir.clone()),
+            u2f: U2fAuthenticator::new(store_dir),
+        }
+    }
+
     pub fn handle_packet(&mut self, report: &[u8]) -> Option<PacketOutcome> {
         if report.len() != REPORT_SIZE {
             return None;
@@ -299,17 +314,17 @@ impl U2fAuthenticator {
             return U2F_SW_WRONG_DATA.to_vec();
         }
 
-        if !approve("Register a new passkey") {
+        if !approval::approve("Register a new passkey") {
             return U2F_SW_CONDITIONS_NOT_SATISFIED.to_vec();
         }
 
         let challenge: [u8; 32] = data[0..32].try_into().expect("challenge length checked");
         let application: [u8; 32] = data[32..64].try_into().expect("application length checked");
-        let signing_key = SigningKey::random(&mut OsRng);
-        let public_key = signing_key.verifying_key().to_encoded_point(false);
+        let signing_key = random_signing_key();
+        let public_key = signing_key.verifying_key().to_sec1_point(false);
         let public_key = public_key.as_bytes();
         let mut key_handle = vec![0u8; 32];
-        OsRng.fill_bytes(&mut key_handle);
+        fill_random(&mut key_handle);
 
         let mut signature_base = Vec::new();
         signature_base.push(0);
@@ -374,7 +389,7 @@ impl U2fAuthenticator {
             return U2F_SW_CONDITIONS_NOT_SATISFIED.to_vec();
         }
 
-        if !approve("Authenticate with this passkey") {
+        if !approval::approve("Authenticate with this passkey") {
             return U2F_SW_CONDITIONS_NOT_SATISFIED.to_vec();
         }
 
@@ -413,27 +428,31 @@ impl U2fAuthenticator {
             })
             .collect();
 
-        if let Err(error) = store::save_u2f_credentials(&credentials) {
+        let path = store::u2f_credentials_path_in_dir(&self.store_dir);
+        if let Err(error) = store::save_u2f_credentials_to_dir(&self.store_dir, &credentials) {
             log::warn!("failed to save U2F credential store: {error:?}");
+        } else {
+            log::info!(
+                "saved {} software U2F credentials to {}",
+                credentials.len(),
+                path.display()
+            );
         }
     }
 }
 
-fn approve(prompt: &str) -> bool {
-    let mut stdout = io::stdout();
-    if write!(stdout, "{prompt}? [y/N] ")
-        .and_then(|_| stdout.flush())
-        .is_err()
-    {
-        return false;
+fn random_signing_key() -> SigningKey {
+    loop {
+        let mut private_key = [0u8; 32];
+        fill_random(&mut private_key);
+        if let Ok(signing_key) = SigningKey::from_slice(&private_key) {
+            return signing_key;
+        }
     }
+}
 
-    let mut answer = String::new();
-    if io::stdin().read_line(&mut answer).is_err() {
-        return false;
-    }
-
-    matches!(answer.trim(), "y" | "Y" | "yes" | "YES" | "Yes")
+fn fill_random(bytes: &mut [u8]) {
+    getrandom::fill(bytes).expect("kernel random source available");
 }
 
 fn apdu_data(payload: &[u8]) -> Option<&[u8]> {

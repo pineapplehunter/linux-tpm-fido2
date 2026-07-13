@@ -1,4 +1,4 @@
-use std::{path::PathBuf, thread, time::Duration};
+use std::{env, path::PathBuf, thread, time::Duration};
 
 use clap::Parser;
 use color_eyre::{Result, eyre::WrapErr};
@@ -14,7 +14,16 @@ fn main() -> Result<()> {
     log::info!("linux-tpm-fido2 starting");
     log::info!("uhid path: {}", config.uhid_path.display());
     log::info!("tpm path: {}", config.tpm_path.display());
-    log::info!("dev store: {}", store::dev_store_dir().display());
+    let store_dir = absolute_path(&config.store_dir);
+    log::info!("dev store: {}", store_dir.display());
+    log::info!(
+        "U2F credential file: {}",
+        store::u2f_credentials_path_in_dir(&store_dir).display()
+    );
+    log::info!(
+        "CTAP2 credential file: {}",
+        store::ctap2_credentials_path_in_dir(&store_dir).display()
+    );
 
     if config.dry_run {
         log::info!("dry run: not opening UHID or TPM devices");
@@ -31,7 +40,7 @@ fn main() -> Result<()> {
     let mut device = UHIDDevice::create_with_path(hid::create_params(), &config.uhid_path)
         .wrap_err_with(|| format!("opening UHID device {}", config.uhid_path.display()))?;
     log::info!("created virtual FIDO HID device; waiting for host reports");
-    let mut ctaphid = ctaphid::PacketHandler::default();
+    let mut ctaphid = ctaphid::PacketHandler::new(store_dir);
 
     loop {
         match device.read() {
@@ -127,6 +136,20 @@ struct Config {
     /// Path to the TPM resource-manager device.
     #[arg(long, default_value = "/dev/tpmrm0")]
     tpm_path: PathBuf,
+
+    /// Directory for development software credentials.
+    #[arg(long, default_value = store::DEV_STORE_DIR)]
+    store_dir: PathBuf,
+}
+
+fn absolute_path(path: &PathBuf) -> PathBuf {
+    if path.is_absolute() {
+        path.clone()
+    } else {
+        env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    }
 }
 
 fn normalize_host_report(data: &[u8]) -> Option<(&[u8], bool)> {
