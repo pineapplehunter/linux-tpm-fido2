@@ -1,0 +1,30 @@
+name: CI
+
+# update note:
+# The hash of the actions used can be updated with actions-up
+# $ nix shell .#bun -c bunx actions-up
+
+on:
+  push:
+  pull_request:
+
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: cachix/install-nix-action@a49548c11d9846ad46ecc0115273879b045f001c # v31.10.7
+        with:
+          extra_nix_config: |
+            extra-substituters = https://niks3.gweb.ihavenojob.work
+            extra-trusted-public-keys = niks3-cache:RW+9UW/AgeDvEawJndPbzNVYQcDPjXA4J23srAi5+sE=
+      - uses: Mic92/niks3-action@12d3e320b2a99b7938f9634bd337cd9fec104609 # v1.1.0
+        with:
+          server-url: https://niks3.s.ihavenojob.work
+      - name: Run checks
+        run: nix flake check
