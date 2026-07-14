@@ -12,12 +12,12 @@ const POLKIT_ACTION_ID: &str = "io.github.pineapplehunter.linux-tpm-fido2.approv
 /// Check with polkit whether the caller is authorized.
 ///
 /// Uses a `unix-process` subject with the given PID and its
-/// start time (in microseconds since the UNIX epoch).
+/// start time (in clock ticks since boot, as read from /proc).
 ///
 /// Returns `Ok(true)` when authorized, `Ok(false)` when denied,
 /// and `Err` when polkit is unavailable or communication fails.
 pub fn check_process(pid: u32) -> Result<bool> {
-    let start_time = process_start_time_us(pid)?;
+    let start_time = process_start_time_ticks(pid)?;
 
     log::info!(
         "polkit subject: pid={pid}, start-time={start_time}, uid={}",
@@ -56,9 +56,9 @@ pub fn check_process(pid: u32) -> Result<bool> {
     Ok(result.0)
 }
 
-/// Read the process start time in microseconds since the UNIX epoch
+/// Read the process start time in clock ticks since boot
 /// from `/proc/<pid>/stat`.
-fn process_start_time_us(pid: u32) -> Result<u64> {
+fn process_start_time_ticks(pid: u32) -> Result<u64> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))?;
     // Fields are space-separated; field 22 (1-indexed) is starttime
     // in clock ticks since boot.  After the comm field (which may
@@ -72,6 +72,5 @@ fn process_start_time_us(pid: u32) -> Result<u64> {
         .get(19)
         .ok_or_else(|| color_eyre::eyre::eyre!("missing starttime in /proc/{pid}/stat"))?
         .parse()?;
-    let ticks_per_sec = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as u64;
-    Ok(ticks * 1_000_000 / ticks_per_sec)
+    Ok(ticks)
 }
