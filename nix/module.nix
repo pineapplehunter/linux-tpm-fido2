@@ -46,6 +46,7 @@ in
         "polkit.service"
       ];
       requires = [ "systemd-logind.service" ];
+      wants = [ "polkit.service" ];
       wantedBy = [ "multi-user.target" ];
 
       unitConfig = {

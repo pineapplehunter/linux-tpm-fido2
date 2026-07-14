@@ -19,6 +19,11 @@ const POLKIT_ACTION_ID: &str = "io.github.pineapplehunter.linux-tpm-fido2.approv
 pub fn check_process(pid: u32) -> Result<bool> {
     let start_time = process_start_time_us(pid)?;
 
+    log::debug!(
+        "polkit subject: pid={pid}, start-time={start_time}, uid={}",
+        unsafe { libc::getuid() }
+    );
+
     let conn = Connection::system()?;
 
     let mut subject_details: HashMap<&str, Value> = HashMap::new();
@@ -67,7 +72,6 @@ fn process_start_time_us(pid: u32) -> Result<u64> {
         .get(19)
         .ok_or_else(|| color_eyre::eyre::eyre!("missing starttime in /proc/{pid}/stat"))?
         .parse()?;
-    // sysconf(_SC_CLK_TCK) is typically 100 on Linux
-    let ticks_per_sec: u64 = 100;
+    let ticks_per_sec = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as u64;
     Ok(ticks * 1_000_000 / ticks_per_sec)
 }
