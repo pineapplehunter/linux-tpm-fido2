@@ -231,6 +231,33 @@ An adversary capable of restoring an older valid database may be able to:
 
 Rollback detection would require additional monotonic state, such as a TPM NV counter or another trusted version mechanism.
 
+#### Current Mitigation Status
+
+Rollback is not currently mitigated. The following mitigations are
+available but not yet implemented:
+
+- **TPM NV counter**: A monotonic NV counter could be incremented
+  on each credential change. Before using a credential, the daemon
+  would verify that the recorded counter value matches the TPM NV
+  counter. An older database snapshot would have a stale counter
+  value, making rollback detectable.
+  - *Trade-off*: NV counters are one-time-writable (per boot for
+    the TPM's limited NV index space) and add write latency.
+    Counter exhaustion must be managed.
+- **Database version table**: A monotonically increasing version
+  number in a separate SQLite table, updated atomically with each
+  credential change. This detects rollback within the database
+  lifetime but not against a cloned database.
+- **TPM-backed HMAC over credential metadata**: An HMAC over the
+  credential record, keyed by a TPM-resident HMAC key (e.g., a
+  `TPM2_PrimarySeal` key or an NV-indexed HMAC key). Each write
+  includes a new HMAC that incorporates the prior HMAC value,
+  forming a hash chain. An adversary reverting a record would
+  need to recompute the chain.
+
+These mitigations are deferred until the credential storage model
+stabilizes and a concrete rollback threat profile is established.
+
 ### Availability
 
 The system does not provide unconditional availability.
@@ -277,6 +304,6 @@ Before production security claims are made, at least the following issues must b
 * Authorization must be performed against the same session before and after interaction.
 * Security-sensitive credential metadata must receive integrity protection.
 * Approval reuse and stale authorization state must be eliminated or formally justified.
-* Rollback behavior must be documented and, where required, mitigated.
+* Rollback behavior must be documented and, where required, mitigated. (Documented in § Rollback Resistance; mitigation deferred.)
 
 No FIDO certification, production hardening, or resistance to a live privileged adversary is currently claimed.

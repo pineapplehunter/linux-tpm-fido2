@@ -75,7 +75,7 @@ The [security model](../docs/security.md#current-implementation-status) lists ni
 - [ ] Bind UHID device generations to active sessions with `uaccess`.
 - [ ] Verify session identity before and after approval interaction.
 - [ ] Add integrity protection (HMAC/AEAD) for stored credential metadata.
-- [ ] Document rollback behavior and mitigations.
+- [x] Document rollback behavior and mitigations.
 - [ ] Integrate polkit authorization calls into the daemon at runtime.
 
 
