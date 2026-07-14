@@ -42,7 +42,6 @@
               package = linux-tpm-fido2;
               tpmPath = "/dev/tpm0";
               uhidPath = "/dev/uhid";
-              storeDir = "/tmp/linux-tpm-fido2-smoke/store";
             };
 
             systemd.services.linux-tpm-fido2.serviceConfig.Environment = "LINUX_TPM_FIDO2_AUTO_APPROVE=1";
@@ -53,24 +52,20 @@
           };
 
         testScript = ''
-          start_all()
+          machine.wait_for_unit("linux-tpm-fido2")
 
-          machine.succeed("mkdir -p /tmp/linux-tpm-fido2-smoke/store")
+          # test if a normal register and login procedure works
+          machine.succeed("WORKDIR=/tmp/linux-tpm-fido2-smoke RP_ID=login.example.test linux-tpm-fido2-smoke register")
+          machine.succeed("WORKDIR=/tmp/linux-tpm-fido2-smoke RP_ID=login.example.test linux-tpm-fido2-smoke assert")
 
-          machine.wait_until_succeeds("systemctl is-active linux-tpm-fido2")
-          machine.wait_until_succeeds("sh -c 'set -- /dev/hidraw*; [ $# -ge 2 ]'")
+          # regression test for tpm storage exhaustion
+          for _ in range(20):
+            machine.succeed("WORKDIR=/tmp/linux-tpm-fido2-smoke RP_ID=login.example.test linux-tpm-fido2-smoke assert")
 
-          machine.succeed("sh -euc 'WORKDIR=/tmp/linux-tpm-fido2-smoke RP_ID=login.example.test linux-tpm-fido2-smoke register || { journalctl -u linux-tpm-fido2 --no-pager; exit 1; }'")
-          machine.succeed("sh -euc 'WORKDIR=/tmp/linux-tpm-fido2-smoke RP_ID=login.example.test linux-tpm-fido2-smoke assert || { journalctl -u linux-tpm-fido2 --no-pager; exit 1; }'")
-
-          machine.succeed("systemctl stop linux-tpm-fido2")
-          machine.wait_until_succeeds("! systemctl is-active linux-tpm-fido2")
-
-          machine.succeed("systemctl start linux-tpm-fido2")
-          machine.wait_until_succeeds("systemctl is-active linux-tpm-fido2")
-          machine.wait_until_succeeds("sh -c 'set -- /dev/hidraw*; [ $# -ge 2 ]'")
-
-          machine.succeed("sh -euc 'WORKDIR=/tmp/linux-tpm-fido2-smoke RP_ID=login.example.test linux-tpm-fido2-smoke assert || { journalctl -u linux-tpm-fido2 --no-pager; exit 1; }'")
+          # regression check for reboot persistance
+          machine.shutdown()
+          machine.wait_for_unit("linux-tpm-fido2")
+          machine.succeed("WORKDIR=/tmp/linux-tpm-fido2-smoke RP_ID=login.example.test linux-tpm-fido2-smoke assert")
         '';
       };
     };

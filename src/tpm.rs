@@ -13,6 +13,7 @@ use tss_esapi::{
         SessionType,
         tss::{TPM2_RH_NULL, TPM2_ST_HASHCHECK},
     },
+    handles::SessionHandle,
     interface_types::{
         algorithm::{HashingAlgorithm, PublicAlgorithm},
         ecc::EccCurve,
@@ -70,6 +71,21 @@ impl Default for TpmConfig {
 
 pub fn check_device(path: &Path) -> std::io::Result<()> {
     std::fs::metadata(path).map(|_| ())
+}
+
+struct PolicySessionGuard {
+    context: *mut Context,
+    session: PolicySession,
+}
+
+impl Drop for PolicySessionGuard {
+    fn drop(&mut self) {
+        let handle: SessionHandle = self.session.into();
+        // Safety: the guard is created from &mut Tpm and dropped before the
+        // &mut borrow is released, so no aliasing &mut references exist.
+        let ctx = unsafe { &mut *self.context };
+        let _ = ctx.flush_context(handle.into());
+    }
 }
 
 pub struct Tpm {
@@ -233,6 +249,11 @@ impl Tpm {
                 Digest::try_from(current_digest)?,
                 selection_list,
             )?;
+
+            let _guard = PolicySessionGuard {
+                context: &mut self.context as *mut Context,
+                session: policy_session,
+            };
 
             self.context
                 .execute_with_session(Some(AuthSession::from(policy_session)), |context| {
