@@ -1,0 +1,26 @@
+[Unit]
+Description=TPM-backed FIDO2 authenticator
+After=systemd-logind.service polkit.service
+Requires=systemd-logind.service
+ConditionPathExists=/dev/uhid
+ConditionPathExists=/dev/tpmrm0
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/linux-tpm-fido2 --store-dir /var/lib/linux-tpm-fido2 --tpm-path /dev/tpmrm0 --uhid-path /dev/uhid
+
+StateDirectory=linux-tpm-fido2
+StateDirectoryMode=0700
+
+Restart=on-failure
+RestartSec=2
+
+# Basic hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=no
+
+[Install]
+WantedBy=multi-user.target

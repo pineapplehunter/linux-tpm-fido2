@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD polkit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/software/polkit/policyconfig-1.dtd">
+
+<policyconfig>
+  <vendor>linux-tpm-fido2</vendor>
+  <vendor_url>https://github.com/pineapplehunter/linux-tpm-fido2</vendor_url>
+  <icon_name>security-high-symbolic</icon_name>
+
+  <action id="io.github.pineapplehunter.linux-tpm-fido2.use-passkey">
+    <description>Use a TPM-backed passkey</description>
+    <message>Authentication is required to use a TPM-backed passkey.</message>
+
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_self</allow_active>
+    </defaults>
+  </action>
+</policyconfig>
