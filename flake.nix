@@ -18,6 +18,7 @@
       imports = [
         inputs.treefmt-nix.flakeModule
         ./nix/nixos-test.nix
+        ./nix/nixos-test-polkit.nix
       ];
 
       flake.nixosModules.default = import ./nix/module.nix;

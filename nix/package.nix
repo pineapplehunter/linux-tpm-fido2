@@ -41,7 +41,7 @@ rustPlatform.buildRustPackage {
   '';
 
   postInstall = ''
-    install -v -D -m 0644 assets/tpm-fido2.rules "$out/lib/udev/rules.d/tpm-fido2.rules"
+    install -v -D -m 0644 assets/tpm-fido2.rules "$out/lib/udev/rules.d/99-tpm-fido2.rules"
     install -v -D -m 0644 assets/tpm-fido2.service "$out/lib/systemd/system/tpm-fido2.service"
     install -v -D -m 0644 assets/tpm-fido2.policy "$out/share/polkit-1/actions/tpm-fido2.policy"
   '';
