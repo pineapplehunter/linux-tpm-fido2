@@ -1,8 +1,8 @@
-# linux-tpm-fido2
+# Linux TPM Fido2
 
-`linux-tpm-fido2` is an experimental Linux TPM-backed FIDO2/WebAuthn authenticator.
+Linux TPM Fido2 is an experimental Linux TPM-backed FIDO2/WebAuthn authenticator.
 
-It exposes a browser-usable virtual HID authenticator, stores credentials in SQLite, and uses the TPM for signing and recovery material.
+It exposes a browser-usable virtual HID authenticator, which uses the TPM for signing.
 
 ## What It Does
 
@@ -10,8 +10,14 @@ It exposes a browser-usable virtual HID authenticator, stores credentials in SQL
 - Creates TPM-backed P-256 credentials for registration and assertion.
 - Supports secure-boot PCR-bound credentials.
 - Supports recovery material unlocked by a passphrase and kept TPM-bound.
-- Exposes a GTK4 control surface for approval and settings, including a modal approval popup and Unix peer checks.
-- Uses a Unix-socket IPC seam between the daemon and the GTK control surface.
+- Checks user acknowledgement through polkit.
+
+## System assumptions
+
+- Linux
+- Systemd enabled
+- TPM2 on system
+- Secureboot Enabled (Recommended)
 
 ## Usage
 
@@ -34,22 +40,15 @@ Useful flags:
 
 ## Features
 
-- CTAPHID framing for `INIT`, `PING`, `CBOR`, `WINK`, `CANCEL`, and `ERROR`.
-- CTAP2 `authenticatorGetInfo`, `authenticatorMakeCredential`, and `authenticatorGetAssertion`.
 - TPM-backed signing keys and PCR policy bindings.
 - Recovery slots stored separately from the primary credential metadata.
 - Sign counter persistence.
-- GTK approval/settings prototype with TOML-backed preferences.
-- Browser request compatibility for `credProps` and `residentKey` shapes.
-- Browser attestation conveyance preferences are accepted and ignored.
 
 ## Future Work
 
 - Expand CTAP2 compatibility for additional browser request shapes.
-- Expand CTAP2 compatibility for additional browser request shapes.
-- Harden the storage model toward production metadata and unlock mechanisms.
-- Decide on the long-term daemon/session model before expanding the UI.
-- Add a production threat model and security review before broad use.
+- Compatibility with polkit
+- Further security review
 
 ## Current Limits
 
