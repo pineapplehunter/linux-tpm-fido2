@@ -255,7 +255,7 @@ async fn save_ctap2_credentials_async(
     let pool = open_database(dir).await?;
     let mut tx = pool.begin().await.wrap_err("beginning store transaction")?;
 
-    sqlx::query("DELETE FROM credential_metadata")
+    sqlx::query!("DELETE FROM credential_metadata")
         .execute(&mut *tx)
         .await
         .wrap_err("clearing credential rows")?;
@@ -272,66 +272,66 @@ async fn save_ctap2_credentials_async(
             }
         };
 
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO credential_metadata \
              (credential_id, rp_id, user_id, user_handle, user_name, user_display_name, sign_count, integrity_mac) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            &credential.id,
+            &credential.rp_id,
+            credential.user_id.map(i64::from),
+            &credential.user_handle,
+            credential.user_name.as_deref(),
+            credential.user_display_name.as_deref(),
+            i64::from(credential.sign_count),
+            key.as_deref(),
         )
-        .bind(&credential.id)
-        .bind(&credential.rp_id)
-        .bind(credential.user_id.map(i64::from))
-        .bind(&credential.user_handle)
-        .bind(credential.user_name.as_deref())
-        .bind(credential.user_display_name.as_deref())
-        .bind(i64::from(credential.sign_count))
-        .bind(key.as_deref())
         .execute(&mut *tx)
         .await
         .wrap_err_with(|| format!("saving credential metadata for rp_id={}", credential.rp_id))?;
 
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO credential_keyslots \
              (credential_id, slot_kind, slot_label, policy_selection, policy_digest, tpm_private, tpm_public, public_key_x, public_key_y, tpm_auth_value) \
              VALUES (?1, 'primary', NULL, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            &credential.id,
+            credential.policy.as_ref().map(|policy| policy.selection.as_str()),
+            credential.policy.as_ref().map(|policy| policy.digest.as_slice()),
+            &credential.key.private,
+            &credential.key.public,
+            &credential.key.public_key_x,
+            &credential.key.public_key_y,
+            credential.key.auth_value.as_deref(),
         )
-        .bind(&credential.id)
-        .bind(credential.policy.as_ref().map(|policy| policy.selection.as_str()))
-        .bind(credential.policy.as_ref().map(|policy| policy.digest.as_slice()))
-        .bind(&credential.key.private)
-        .bind(&credential.key.public)
-        .bind(&credential.key.public_key_x)
-        .bind(&credential.key.public_key_y)
-        .bind(credential.key.auth_value.as_deref())
         .execute(&mut *tx)
         .await
         .wrap_err_with(|| format!("saving primary keyslot for rp_id={}", credential.rp_id))?;
 
         if let Some(recovery) = &credential.recovery {
-            let recovery_keyslot = sqlx::query(
+            let recovery_keyslot = sqlx::query!(
                 "INSERT INTO credential_keyslots \
                  (credential_id, slot_kind, slot_label, policy_selection, policy_digest, tpm_private, tpm_public, public_key_x, public_key_y, tpm_auth_value) \
                  VALUES (?1, 'recovery', ?2, NULL, NULL, ?3, ?4, ?5, ?6, ?7)",
+                &credential.id,
+                recovery.label.as_deref(),
+                &recovery.key.private,
+                &recovery.key.public,
+                &recovery.key.public_key_x,
+                &recovery.key.public_key_y,
+                recovery.key.auth_value.as_deref(),
             )
-            .bind(&credential.id)
-            .bind(recovery.label.as_deref())
-            .bind(&recovery.key.private)
-            .bind(&recovery.key.public)
-            .bind(&recovery.key.public_key_x)
-            .bind(&recovery.key.public_key_y)
-            .bind(recovery.key.auth_value.as_deref())
             .execute(&mut *tx)
             .await
             .wrap_err_with(|| format!("saving recovery keyslot for rp_id={}", credential.rp_id))?;
 
-            sqlx::query(
+            sqlx::query!(
                 "INSERT INTO credential_tokens \
                  (keyslot_id, token_type, label, passphrase_salt, passphrase_hash) \
                  VALUES (?1, 'passphrase', ?2, ?3, ?4)",
+                recovery_keyslot.last_insert_rowid(),
+                recovery.label.as_deref(),
+                recovery.passphrase_salt.as_slice(),
+                recovery.passphrase_hash.as_slice(),
             )
-            .bind(recovery_keyslot.last_insert_rowid())
-            .bind(recovery.label.as_deref())
-            .bind(recovery.passphrase_salt.as_slice())
-            .bind(recovery.passphrase_hash.as_slice())
             .execute(&mut *tx)
             .await
             .wrap_err_with(|| format!("saving recovery token for rp_id={}", credential.rp_id))?;
@@ -349,13 +349,13 @@ async fn update_ctap2_sign_count_async(
     sign_count: u32,
 ) -> Result<()> {
     let pool = open_database(dir).await?;
-    let result = sqlx::query(
+    let result = sqlx::query!(
         "UPDATE credential_metadata \
          SET sign_count = ?1, updated_at = CURRENT_TIMESTAMP \
          WHERE credential_id = ?2",
+        i64::from(sign_count),
+        credential_id,
     )
-    .bind(i64::from(sign_count))
-    .bind(credential_id)
     .execute(&pool)
     .await
     .wrap_err("updating CTAP2 credential sign_count")?;

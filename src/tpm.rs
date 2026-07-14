@@ -21,7 +21,7 @@ use tss_esapi::{
         session_handles::{AuthSession, PolicySession},
     },
     structures::{
-        Auth, Digest, DigestList, EccPoint, EccScheme, HashScheme, PcrSelectionList,
+        Digest, DigestList, EccPoint, EccScheme, HashScheme, PcrSelectionList,
         PcrSelectionListBuilder, PcrSlot, Private, Public, PublicBuilder,
         PublicEccParametersBuilder, RsaExponent, Signature, SignatureScheme,
         SymmetricDefinitionObject,
@@ -128,20 +128,9 @@ impl Tpm {
     ) -> Result<TpmCredential> {
         let parent = self.create_storage_parent()?;
         let public = signing_key_public(policy)?;
-        let auth_value = if policy.is_some() {
-            let mut value = vec![0u8; 16];
-            getrandom::fill(&mut value).wrap_err("generating TPM auth value")?;
-            Some(value)
-        } else {
-            None
-        };
-        let auth = auth_value
-            .clone()
-            .map(|v| Auth::try_from(v).wrap_err("building TPM auth value"))
-            .transpose()?;
 
         let key = self.context.execute_with_nullauth_session(|context| {
-            context.create(parent, public, auth, None, None, None)
+            context.create(parent, public, None, None, None, None)
         });
         self.context
             .flush_context(parent.into())
@@ -161,7 +150,7 @@ impl Tpm {
                 .wrap_err("marshalling TPM credential public blob")?,
             public_key_x: x,
             public_key_y: y,
-            auth_value,
+            auth_value: None,
         })
     }
 
@@ -217,16 +206,6 @@ impl Tpm {
             .execute_with_nullauth_session(|context| context.load(parent, private, public))
             .wrap_err("loading TPM credential signing key")?;
 
-        if let Some(auth_val) = &credential.auth_value {
-            self.context
-                .tr_set_auth(
-                    key_handle.into(),
-                    Auth::try_from(auth_val.clone())
-                        .wrap_err("building TPM auth value for signing")?,
-                )
-                .wrap_err("setting TPM key auth value for signing")?;
-        }
-
         let digest = Digest::try_from(digest.to_vec()).wrap_err("building TPM signing digest")?;
         let validation = TPMT_TK_HASHCHECK {
             tag: TPM2_ST_HASHCHECK,
@@ -234,7 +213,6 @@ impl Tpm {
             digest: Default::default(),
         };
 
-        let has_auth = credential.auth_value.is_some();
         let signature = if policy.is_some() {
             let selection_list = secure_boot_pcr_selection_list()?;
             let current_digest = self.current_pcr_digest(&selection_list)?;
@@ -252,45 +230,15 @@ impl Tpm {
             let policy_session = PolicySession::try_from(policy_session)?;
             self.context.policy_pcr(
                 policy_session,
-                Digest::try_from(current_digest.clone())?,
+                Digest::try_from(current_digest)?,
                 selection_list,
             )?;
 
-            if has_auth {
-                self.context.execute_with_sessions(
-                    (
-                        Some(AuthSession::Password),
-                        Some(AuthSession::from(policy_session)),
-                        None,
-                    ),
-                    |context| {
-                        context.sign(
-                            key_handle,
-                            digest.clone(),
-                            SignatureScheme::Null,
-                            validation.try_into()?,
-                        )
-                    },
-                )
-            } else {
-                self.context.execute_with_session(
-                    Some(AuthSession::from(policy_session)),
-                    |context| {
-                        context.sign(
-                            key_handle,
-                            digest.clone(),
-                            SignatureScheme::Null,
-                            validation.try_into()?,
-                        )
-                    },
-                )
-            }
-        } else if has_auth {
             self.context
-                .execute_with_session(Some(AuthSession::Password), |context| {
+                .execute_with_session(Some(AuthSession::from(policy_session)), |context| {
                     context.sign(
                         key_handle,
-                        digest,
+                        digest.clone(),
                         SignatureScheme::Null,
                         validation.try_into()?,
                     )

@@ -19,12 +19,6 @@ in
 
     package = lib.mkPackageOption pkgs "linux-tpm-fido2" { };
 
-    storeDir = mkOption {
-      type = types.str;
-      default = "/var/lib/linux-tpm-fido2";
-      description = "Directory for credential storage";
-    };
-
     tpmPath = mkOption {
       type = types.str;
       default = "/dev/tpmrm0";
@@ -61,10 +55,15 @@ in
         ];
       };
 
+      path = [ cfg.package ];
+
+      script = ''
+        linux-tpm-fido2 --store-dir "$STATE_DIRECTORY" --tpm-path "${cfg.tpmPath}" --uhid-path "${cfg.uhidPath}"
+      '';
+
       serviceConfig = {
         Type = "simple";
-        ExecStart = "${cfg.package}/bin/linux-tpm-fido2 --store-dir ${cfg.storeDir} --tpm-path ${cfg.tpmPath} --uhid-path ${cfg.uhidPath}";
-        StateDirectory = lib.strings.removePrefix "/var/lib/" cfg.storeDir;
+        StateDirectory = "linux-tpm-fido2";
         StateDirectoryMode = "0700";
         Restart = "on-failure";
         RestartSec = 2;

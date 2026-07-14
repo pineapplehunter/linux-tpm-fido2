@@ -36,6 +36,7 @@
 - Runtime logging uses `log` plus `env_logger`; default level is `info`, and `RUST_LOG=debug` enables detailed UHID diagnostics.
 - Real daemon runs default to `/dev/uhid` and `/dev/tpmrm0`; expect `sudo` or udev permissions while the privilege model is being designed.
 - Firefox on Linux is the first browser target.
+- When using sqlx, prefer to use the "query!" macro for readability instead of query function.
 
 ## Git-Ignored Outputs
 

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO credential_tokens (keyslot_id, token_type, label, passphrase_salt, passphrase_hash) VALUES (?1, 'passphrase', ?2, ?3, ?4)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "dbb6e44b4b693ba75b8e90caa3192d61c8eb6be45b119b0fa063867c2c2b95c5"
+}
