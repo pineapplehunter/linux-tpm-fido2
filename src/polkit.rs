@@ -19,7 +19,7 @@ const POLKIT_ACTION_ID: &str = "io.github.pineapplehunter.linux-tpm-fido2.approv
 pub fn check_process(pid: u32) -> Result<bool> {
     let start_time = process_start_time_us(pid)?;
 
-    log::debug!(
+    log::info!(
         "polkit subject: pid={pid}, start-time={start_time}, uid={}",
         unsafe { libc::getuid() }
     );
