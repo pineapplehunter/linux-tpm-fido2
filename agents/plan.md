@@ -5,24 +5,17 @@
 Use this file as a todolist with context.
 This section has the task list.
 Tasks that need to be worked on should be in "Next Tasks".
-Move the task to "Current Task" when starting woworkon it.
+Move the task to "In Progress" when starting working on it.
 Move the task to the end of "Completed" when finished with a timestamp like "(finished YY-MM-DD HH:mm)".
 
-### Current Task
+### In Progress
 
-**Move the task you are working on here**
+- [x] Fix polkit action ID mismatch: code uses `org.linux_tpm_fido2.approve`, policy now matches.
 
 ### Next Tasks
 
-- [ ] Remove the gtk frontend code and library to prepare for switching to polkit based authentication.
-- [ ] Add a feature flag or a environment flag to automatically approve the requests, so it is easier to test the program
-- [ ] When you have multiple contants for the same context (especially for ctap2), convert them into a enum.
-- [ ] Make a very obvious warning when using the auto approve feature.
-- [ ] See if virtualisation.tpm.enable might help with the nixos test (exists in QEMU VM module, current swtpm CUSE approach is correct)
-- [ ] Write a nixos module that enables the daemon systemd service, polkit and udev.
-- [ ] Add a nixos test to see if the program works after reboot (already exists — kills daemon, restarts, verifies credentials persist)
-- [ ] Implement polkit authorization in approval flow.
-- [ ] Bind UHID device to active sessions via uaccess (already done in tpm-fido2.rules with TAG+="uaccess").
+- [ ] Evaluate whether the Unix-socket IPC control surface (ipc.rs) has ongoing value or should be removed alongside the GTK frontend.
+- [ ] Refactor NixOS test to use `virtualisation.tpm.enable` instead of manual swtpm CUSE setup — eliminates `modprobe cuse` dependency and simplifies the test script.
 
 ### Completed
 
@@ -64,6 +57,21 @@ Move the task to the end of "Completed" when finished with a timestamp like "(fi
 - [x] GTK frontend removed; approval falls back to stdin/stdout; polkit integration planned.
 - [x] Add GTK approval and settings UI after transport, TPM, and storage are stable.
 - [x] Fix sqlx migration. The normalized schema is now in place and the store round-trips under tests.
+- [x] Eliminate approval-reuse grace period in CTAP2 assertions (2026-07-14 21:24).
+- [x] Switch passphrase hashing from SHA-256 to PBKDF2-HMAC-SHA256 (2026-07-14 21:27).
+- [x] Set TPM auth value on PCR-bound credential keys (2026-07-14 21:42).
+- [x] Document rollback behavior and mitigations in security.md (2026-07-14 21:43).
+- [x] Remove GTK frontend code and dependencies (2026-07-14 21:48).
+- [x] Add HMAC-SHA256 integrity protection for credential metadata (2026-07-14 21:56).
+- [x] Add systemd-logind integration for dynamic session detection (2026-07-14 22:00).
+- [x] Add session verification before and after approval (2026-07-14 22:07).
+- [x] Add LINUX_TPM_FIDO2_AUTO_APPROVE env var for testing (2026-07-14 22:08).
+- [x] Add prominent warning when LINUX_TPM_FIDO2_AUTO_APPROVE is set (2026-07-14 22:11).
+- [x] Implement polkit authorization in approval flow (2026-07-14 22:17).
+- [x] Refactor CTAP2 and CTAPHID command/error constants into enums (2026-07-14 22:26).
+- [x] Add NixOS module and update test to use it; reboot test verifies credential persistence (2026-07-14 22:30).
+- [x] Investigated virtualisation.tpm.enable — swtpm CUSE approach is correct for QEMU-less VM TPM provisioning.
+- [x] Bind UHID device to active sessions via uaccess in tpm-fido2.rules.
 
 ## General things to keep in mind.
 - Commit the changes to git after a task

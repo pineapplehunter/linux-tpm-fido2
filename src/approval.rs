@@ -74,21 +74,21 @@ fn approve_via_ipc(
     match ipc::send_request(&socket_path, &request) {
         Ok(IpcResponse::ApprovalDecision(decision)) => {
             log::info!(
-                "approval handled by GTK IPC at {} with decision={decision}",
+                "approval handled by control socket at {} with decision={decision}",
                 socket_path.display()
             );
             Some(decision)
         }
         Ok(other) => {
             log::warn!(
-                "GTK IPC approval returned unexpected response at {}: {other:?}",
+                "control socket approval returned unexpected response at {}: {other:?}",
                 socket_path.display()
             );
             None
         }
         Err(error) => {
             log::warn!(
-                "GTK IPC approval unavailable at {}: {error:?}",
+                "control socket approval unavailable at {}: {error:?}",
                 socket_path.display()
             );
             None
