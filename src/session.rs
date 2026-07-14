@@ -34,6 +34,12 @@ pub struct SessionContext {
 
 impl SessionContext {
     pub fn detect() -> Self {
+        // Prefer dynamic detection via systemd-logind
+        if let Some(ctx) = crate::systemd_logind::detect_session() {
+            return ctx;
+        }
+
+        // Fall back to environment variables
         let uid = env::var("SUDO_UID")
             .ok()
             .and_then(|value| value.parse().ok())

@@ -17,9 +17,16 @@
 - When a task is finished and moved to Completed, write the time the task finished
 - When the current task is moderately large split them up into subtasks and prepenthem in the "Next Tasks" Section
 
+## Current task
+
+**Move the task you areworking on here**
+
 ## Next Tasks
 
 - [x] Remove the gtk frontend code and library to prepare for switching to polkit based authentication.
+- [ ] Add a feature flag or a environment flag to automatically approve the requests, so it is easier to test the program
+- [ ] See if virtualisation.tpm.enable might help with the nixos test
+- [ ] Add a nixos test to see if the program works after reboot
 - [ ] Start implementation according to the "Security model design" section in this document.
 - [ ] Start next task in plan.md
 
