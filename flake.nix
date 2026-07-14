@@ -20,6 +20,8 @@
         ./nix/nixos-test.nix
       ];
 
+      flake.nixosModules.default = import ./nix/module.nix;
+
       systems = [
         "aarch64-darwin"
         "aarch64-linux"

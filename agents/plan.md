@@ -14,15 +14,15 @@ Move the task to the end of "Completed" when finished with a timestamp like "(fi
 
 ### Next Tasks
 
-- [x] Remove the gtk frontend code and library to prepare for switching to polkit based authentication.
-- [x] Add a feature flag or a environment flag to automatically approve the requests, so it is easier to test the program
+- [ ] Remove the gtk frontend code and library to prepare for switching to polkit based authentication.
+- [ ] Add a feature flag or a environment flag to automatically approve the requests, so it is easier to test the program
 - [ ] When you have multiple contants for the same context (especially for ctap2), convert them into a enum.
-- [x] Make a very obvious warning when using the auto approve feature.
-- [x] See if virtualisation.tpm.enable might help with the nixos test (exists in QEMU VM module, current swtpm CUSE approach is correct)
+- [ ] Make a very obvious warning when using the auto approve feature.
+- [ ] See if virtualisation.tpm.enable might help with the nixos test (exists in QEMU VM module, current swtpm CUSE approach is correct)
 - [ ] Write a nixos module that enables the daemon systemd service, polkit and udev.
-- [x] Add a nixos test to see if the program works after reboot (already exists — kills daemon, restarts, verifies credentials persist)
-- [x] Implement polkit authorization in approval flow.
-- [x] Bind UHID device to active sessions via uaccess (already done in tpm-fido2.rules with TAG+="uaccess").
+- [ ] Add a nixos test to see if the program works after reboot (already exists — kills daemon, restarts, verifies credentials persist)
+- [ ] Implement polkit authorization in approval flow.
+- [ ] Bind UHID device to active sessions via uaccess (already done in tpm-fido2.rules with TAG+="uaccess").
 
 ### Completed
 
