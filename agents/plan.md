@@ -15,11 +15,9 @@
 - The user may add tasks in the list.
 - When switching to a new task put the task under "## In Progress" in the plan.md file.
 - When a task is finished and moved to Completed, write the time the task finished
+- When the current task is moderately large split them up into subtasks and prepenthem in the "Next Tasks" Section
 
-
-
-
-## Next
+## Next Tasks
 
 - [ ] Remove the gtk frontend code and library to prepare for switching to polkit based authentication.
 - [ ] Start implementation according to the "Security model design" section in this document.
@@ -70,8 +68,8 @@
 
 The [security model](../docs/security.md#current-implementation-status) lists nine issues that must be resolved before production security claims are made.
 
-- [ ] Remove approval-reuse grace period in CTAP2 assertions.
-- [ ] Switch passphrase hashing from SHA-256 to an offline-resistant KDF (PBKDF2/argon2).
+- [x] Remove approval-reuse grace period in CTAP2 assertions.
+- [x] Switch passphrase hashing from SHA-256 to an offline-resistant KDF (PBKDF2/argon2).
 - [ ] Set a non-empty TPM auth value on PCR-bound credential keys to prevent empty-auth bypass.
 - [ ] Obtain session identity dynamically from `systemd-logind` instead of environment variables.
 - [ ] Bind UHID device generations to active sessions with `uaccess`.

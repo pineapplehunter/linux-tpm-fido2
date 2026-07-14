@@ -4,6 +4,7 @@ use std::{
 };
 
 use color_eyre::{Result, eyre::WrapErr};
+use pbkdf2::pbkdf2_hmac;
 use sha2::{Digest as ShaDigest, Sha256};
 use tss_esapi::{
     Context,
@@ -380,11 +381,17 @@ fn secure_boot_pcr_selection_name() -> String {
     "sha256:7".to_owned()
 }
 
+const RECOVERY_PBKDF2_ITERATIONS: u32 = 600_000;
+
 pub fn recovery_passphrase_hash(passphrase_salt: &[u8], passphrase: &str) -> Vec<u8> {
-    let mut hasher = Sha256::new();
-    hasher.update(passphrase_salt);
-    hasher.update(passphrase.as_bytes());
-    hasher.finalize().to_vec()
+    let mut output = vec![0u8; 32];
+    pbkdf2_hmac::<Sha256>(
+        passphrase.as_bytes(),
+        passphrase_salt,
+        RECOVERY_PBKDF2_ITERATIONS,
+        &mut output,
+    );
+    output
 }
 
 pub fn recovery_passphrase_matches(
@@ -432,13 +439,15 @@ mod tests {
     use super::{recovery_passphrase_hash, recovery_passphrase_matches};
 
     #[test]
-    fn recovery_passphrase_hash_is_deterministic() {
+    fn recovery_passphrase_hash_uses_pbkdf2_is_deterministic() {
         let salt = b"0123456789abcdef0123456789abcdef";
         let hash = recovery_passphrase_hash(salt, "correct horse battery staple");
 
+        assert_eq!(hash.len(), 32, "PBKDF2 output should be 32 bytes (SHA-256)");
         assert_eq!(
             hash,
-            recovery_passphrase_hash(salt, "correct horse battery staple")
+            recovery_passphrase_hash(salt, "correct horse battery staple"),
+            "PBKDF2 should be deterministic with same salt and passphrase"
         );
         assert!(recovery_passphrase_matches(
             salt,
@@ -450,5 +459,15 @@ mod tests {
             "wrong horse battery staple",
             &hash
         ));
+    }
+
+    #[test]
+    fn recovery_passphrase_hash_different_salt_gives_different_hash() {
+        let hash1 = recovery_passphrase_hash(b"salt1", "passphrase");
+        let hash2 = recovery_passphrase_hash(b"salt2", "passphrase");
+        assert_ne!(
+            hash1, hash2,
+            "different salts must produce different hashes"
+        );
     }
 }
