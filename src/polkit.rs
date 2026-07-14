@@ -24,7 +24,7 @@ pub fn check_process(pid: u32) -> Result<bool> {
     let mut subject_details: HashMap<&str, Value> = HashMap::new();
     subject_details.insert("pid", Value::from(pid));
     subject_details.insert("start-time", Value::from(start_time));
-    subject_details.insert("uid", Value::from(unsafe { libc::getuid() }));
+    subject_details.insert("uid", Value::from(unsafe { libc::getuid() as i32 }));
     let subject = ("unix-process", subject_details);
 
     let empty_details: HashMap<&str, &str> = HashMap::new();
