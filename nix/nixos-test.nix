@@ -29,27 +29,26 @@
       checks.nixos = pkgs.testers.runNixOSTest {
         name = "linux-tpm-fido2";
 
-        nodes.machine =
-          { ... }:
-          {
-            imports = [ ./module.nix ];
+        nodes.machine = {
+          imports = [ ./module.nix ];
 
-            virtualisation.memorySize = 1536;
-            virtualisation.tpm.enable = true;
+          virtualisation.memorySize = 1536;
+          virtualisation.tpm.enable = true;
 
-            services.linux-tpm-fido2 = {
-              enable = true;
-              package = linux-tpm-fido2;
-              tpmPath = "/dev/tpm0";
-              uhidPath = "/dev/uhid";
-            };
-
-            systemd.services.linux-tpm-fido2.serviceConfig.Environment = "LINUX_TPM_FIDO2_AUTO_APPROVE=1";
-
-            environment.systemPackages = [
-              linux-tpm-fido2-smoke
-            ];
+          services.linux-tpm-fido2 = {
+            enable = true;
+            package = linux-tpm-fido2;
+            tpmPath = "/dev/tpm0";
+            uhidPath = "/dev/uhid";
           };
+          };
+
+          systemd.services.linux-tpm-fido2.serviceConfig.Environment = "LINUX_TPM_FIDO2_AUTO_APPROVE=1";
+
+          environment.systemPackages = [
+            linux-tpm-fido2-smoke
+          ];
+        };
 
         testScript = ''
           machine.wait_for_unit("linux-tpm-fido2")
