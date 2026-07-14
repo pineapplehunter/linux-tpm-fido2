@@ -81,6 +81,7 @@ impl Authenticator {
                         public: credential.key.public,
                         public_key_x: credential.key.public_key_x,
                         public_key_y: credential.key.public_key_y,
+                        auth_value: credential.key.auth_value,
                     },
                     policy: credential.policy,
                     recovery: credential.recovery,
@@ -201,6 +202,7 @@ impl Authenticator {
                                 public: material.key.public,
                                 public_key_x: material.key.public_key_x,
                                 public_key_y: material.key.public_key_y,
+                                auth_value: material.key.auth_value,
                             },
                         })
                     }
@@ -450,6 +452,7 @@ impl Authenticator {
                     public: credential.key.public.clone(),
                     public_key_x: credential.key.public_key_x.clone(),
                     public_key_y: credential.key.public_key_y.clone(),
+                    auth_value: credential.key.auth_value.clone(),
                 },
                 policy: credential.policy.clone(),
                 recovery: credential.recovery.clone(),
@@ -1365,6 +1368,7 @@ mod tests {
                     public: credential.key.public.clone(),
                     public_key_x: credential.key.public_key_x.clone(),
                     public_key_y: credential.key.public_key_y.clone(),
+                    auth_value: credential.key.auth_value.clone(),
                 },
                 policy: None,
                 recovery: None,
@@ -1437,6 +1441,7 @@ mod tests {
                 public: vec![10],
                 public_key_x: vec![11; 32],
                 public_key_y: vec![12; 32],
+                auth_value: None,
             },
             sign_count,
         }

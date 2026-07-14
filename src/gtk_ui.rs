@@ -516,6 +516,7 @@ mod tests {
                 public: vec![4],
                 public_key_x: vec![5; 32],
                 public_key_y: vec![6; 32],
+                auth_value: None,
             },
             policy: None,
             recovery: None,

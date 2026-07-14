@@ -70,7 +70,7 @@ The [security model](../docs/security.md#current-implementation-status) lists ni
 
 - [x] Remove approval-reuse grace period in CTAP2 assertions.
 - [x] Switch passphrase hashing from SHA-256 to an offline-resistant KDF (PBKDF2/argon2).
-- [ ] Set a non-empty TPM auth value on PCR-bound credential keys to prevent empty-auth bypass.
+- [x] Set a non-empty TPM auth value on PCR-bound credential keys to prevent empty-auth bypass.
 - [ ] Obtain session identity dynamically from `systemd-logind` instead of environment variables.
 - [ ] Bind UHID device generations to active sessions with `uaccess`.
 - [ ] Verify session identity before and after approval interaction.

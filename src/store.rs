@@ -51,6 +51,7 @@ pub struct StoredTpmKey {
     pub public: Vec<u8>,
     pub public_key_x: Vec<u8>,
     pub public_key_y: Vec<u8>,
+    pub auth_value: Option<Vec<u8>>,
 }
 
 pub fn dev_store_dir() -> PathBuf {
@@ -115,9 +116,11 @@ async fn load_ctap2_credentials_async(
                 p.policy_selection, p.policy_digest, \
                 p.tpm_private AS primary_tpm_private, p.tpm_public AS primary_tpm_public, \
                 p.public_key_x AS primary_public_key_x, p.public_key_y AS primary_public_key_y, \
+                p.tpm_auth_value AS primary_tpm_auth_value, \
                 r.slot_label AS recovery_label, \
                 r.tpm_private AS recovery_tpm_private, r.tpm_public AS recovery_tpm_public, \
                 r.public_key_x AS recovery_public_key_x, r.public_key_y AS recovery_public_key_y, \
+                r.tpm_auth_value AS recovery_tpm_auth_value, \
                 t.passphrase_salt, t.passphrase_hash \
          FROM credential_metadata m \
          JOIN credential_keyslots p \
@@ -146,6 +149,9 @@ async fn load_ctap2_credentials_async(
             let recovery_public: Option<Vec<u8>> = row.try_get("recovery_tpm_public")?;
             let recovery_public_key_x: Option<Vec<u8>> = row.try_get("recovery_public_key_x")?;
             let recovery_public_key_y: Option<Vec<u8>> = row.try_get("recovery_public_key_y")?;
+            let primary_tpm_auth_value: Option<Vec<u8>> = row.try_get("primary_tpm_auth_value")?;
+            let recovery_tpm_auth_value: Option<Vec<u8>> =
+                row.try_get("recovery_tpm_auth_value")?;
 
             Ok(StoredCtap2Credential {
                 id: row.try_get("credential_id")?,
@@ -166,6 +172,7 @@ async fn load_ctap2_credentials_async(
                     public: row.try_get("primary_tpm_public")?,
                     public_key_x: row.try_get("primary_public_key_x")?,
                     public_key_y: row.try_get("primary_public_key_y")?,
+                    auth_value: primary_tpm_auth_value,
                 },
                 policy: match (policy_selection, policy_digest) {
                     (Some(selection), Some(digest)) => Some(StoredPcrPolicy { selection, digest }),
@@ -197,6 +204,7 @@ async fn load_ctap2_credentials_async(
                             public,
                             public_key_x,
                             public_key_y,
+                            auth_value: recovery_tpm_auth_value,
                         },
                     }),
                     _ => None,
@@ -239,8 +247,8 @@ async fn save_ctap2_credentials_async(
 
         sqlx::query(
             "INSERT INTO credential_keyslots \
-             (credential_id, slot_kind, slot_label, policy_selection, policy_digest, tpm_private, tpm_public, public_key_x, public_key_y) \
-             VALUES (?1, 'primary', NULL, ?2, ?3, ?4, ?5, ?6, ?7)",
+             (credential_id, slot_kind, slot_label, policy_selection, policy_digest, tpm_private, tpm_public, public_key_x, public_key_y, tpm_auth_value) \
+             VALUES (?1, 'primary', NULL, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         )
         .bind(&credential.id)
         .bind(credential.policy.as_ref().map(|policy| policy.selection.as_str()))
@@ -249,6 +257,7 @@ async fn save_ctap2_credentials_async(
         .bind(&credential.key.public)
         .bind(&credential.key.public_key_x)
         .bind(&credential.key.public_key_y)
+        .bind(credential.key.auth_value.as_deref())
         .execute(&mut *tx)
         .await
         .wrap_err_with(|| format!("saving primary keyslot for rp_id={}", credential.rp_id))?;
@@ -256,8 +265,8 @@ async fn save_ctap2_credentials_async(
         if let Some(recovery) = &credential.recovery {
             let recovery_keyslot = sqlx::query(
                 "INSERT INTO credential_keyslots \
-                 (credential_id, slot_kind, slot_label, policy_selection, policy_digest, tpm_private, tpm_public, public_key_x, public_key_y) \
-                 VALUES (?1, 'recovery', ?2, NULL, NULL, ?3, ?4, ?5, ?6)",
+                 (credential_id, slot_kind, slot_label, policy_selection, policy_digest, tpm_private, tpm_public, public_key_x, public_key_y, tpm_auth_value) \
+                 VALUES (?1, 'recovery', ?2, NULL, NULL, ?3, ?4, ?5, ?6, ?7)",
             )
             .bind(&credential.id)
             .bind(recovery.label.as_deref())
@@ -265,6 +274,7 @@ async fn save_ctap2_credentials_async(
             .bind(&recovery.key.public)
             .bind(&recovery.key.public_key_x)
             .bind(&recovery.key.public_key_y)
+            .bind(recovery.key.auth_value.as_deref())
             .execute(&mut *tx)
             .await
             .wrap_err_with(|| format!("saving recovery keyslot for rp_id={}", credential.rp_id))?;
@@ -384,6 +394,7 @@ mod tests {
                 public: vec![11, 12],
                 public_key_x: vec![13; 32],
                 public_key_y: vec![14; 32],
+                auth_value: None,
             },
             policy: Some(StoredPcrPolicy {
                 selection: "sha256:7".to_owned(),
@@ -398,6 +409,7 @@ mod tests {
                     public: vec![20, 21],
                     public_key_x: vec![22; 32],
                     public_key_y: vec![23; 32],
+                    auth_value: None,
                 },
             }),
             sign_count: 10,
@@ -426,6 +438,7 @@ mod tests {
                 public: vec![2],
                 public_key_x: vec![3; 32],
                 public_key_y: vec![4; 32],
+                auth_value: None,
             },
             policy: None,
             recovery: None,
@@ -443,6 +456,7 @@ mod tests {
                 public: vec![6],
                 public_key_x: vec![7; 32],
                 public_key_y: vec![8; 32],
+                auth_value: None,
             },
             policy: None,
             recovery: None,
@@ -511,6 +525,7 @@ mod tests {
                 public: vec![6],
                 public_key_x: vec![7; 32],
                 public_key_y: vec![8; 32],
+                auth_value: None,
             },
             policy: None,
             recovery: None,
