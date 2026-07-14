@@ -415,7 +415,7 @@ fn load_or_generate_hmac_key(dir: &Path) -> Result<[u8; 32]> {
         let mut key = [0u8; 32];
         getrandom::fill(&mut key).wrap_err("generating HMAC key from system random")?;
         fs::create_dir_all(dir).wrap_err_with(|| format!("creating {}", dir.display()))?;
-        fs::write(&path, &key)
+        fs::write(&path, key)
             .wrap_err_with(|| format!("writing HMAC key to {}", path.display()))?;
         log::info!("generated new HMAC integrity key at {}", path.display());
         Ok(key)

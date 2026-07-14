@@ -4,10 +4,30 @@ use crate::{approval, session, store, tpm};
 use ciborium::value::Value;
 use sha2::{Digest, Sha256};
 
-pub const CMD_AUTHENTICATOR_MAKE_CREDENTIAL: u8 = 0x01;
-pub const CMD_AUTHENTICATOR_GET_ASSERTION: u8 = 0x02;
-pub const CMD_AUTHENTICATOR_GET_NEXT_ASSERTION: u8 = 0x08;
-pub const CMD_AUTHENTICATOR_GET_INFO: u8 = 0x04;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Ctap2Command {
+    MakeCredential = 0x01,
+    GetAssertion = 0x02,
+    GetInfo = 0x04,
+    GetNextAssertion = 0x08,
+}
+
+impl Ctap2Command {
+    pub fn from_byte(b: u8) -> Option<Self> {
+        match b {
+            0x01 => Some(Self::MakeCredential),
+            0x02 => Some(Self::GetAssertion),
+            0x04 => Some(Self::GetInfo),
+            0x08 => Some(Self::GetNextAssertion),
+            _ => None,
+        }
+    }
+
+    pub fn byte(self) -> u8 {
+        self as u8
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -110,14 +130,18 @@ impl Authenticator {
             return error_response(ErrorStatus::InvalidCommand);
         };
 
+        let Some(command) = Ctap2Command::from_byte(command) else {
+            log::info!("ctap2 command: unknown");
+            return error_response(ErrorStatus::InvalidCommand);
+        };
+
         log::info!("ctap2 command: {}", command_name(command));
 
         match match command {
-            CMD_AUTHENTICATOR_GET_INFO => Ok(get_info_response()),
-            CMD_AUTHENTICATOR_MAKE_CREDENTIAL => self.make_credential(body),
-            CMD_AUTHENTICATOR_GET_ASSERTION => self.get_assertion(body),
-            CMD_AUTHENTICATOR_GET_NEXT_ASSERTION => self.get_next_assertion(body),
-            _ => Err(ErrorStatus::InvalidCommand),
+            Ctap2Command::GetInfo => Ok(get_info_response()),
+            Ctap2Command::MakeCredential => self.make_credential(body),
+            Ctap2Command::GetAssertion => self.get_assertion(body),
+            Ctap2Command::GetNextAssertion => self.get_next_assertion(body),
         } {
             Ok(response) => response,
             Err(status) => error_response(status),
@@ -543,13 +567,12 @@ impl Default for Authenticator {
     }
 }
 
-pub fn command_name(command: u8) -> &'static str {
+pub fn command_name(command: Ctap2Command) -> &'static str {
     match command {
-        CMD_AUTHENTICATOR_MAKE_CREDENTIAL => "authenticatorMakeCredential",
-        CMD_AUTHENTICATOR_GET_ASSERTION => "authenticatorGetAssertion",
-        CMD_AUTHENTICATOR_GET_NEXT_ASSERTION => "authenticatorGetNextAssertion",
-        CMD_AUTHENTICATOR_GET_INFO => "authenticatorGetInfo",
-        _ => "unknown",
+        Ctap2Command::MakeCredential => "authenticatorMakeCredential",
+        Ctap2Command::GetAssertion => "authenticatorGetAssertion",
+        Ctap2Command::GetNextAssertion => "authenticatorGetNextAssertion",
+        Ctap2Command::GetInfo => "authenticatorGetInfo",
     }
 }
 
@@ -976,14 +999,14 @@ mod tests {
 
     #[test]
     fn get_info_starts_with_success() {
-        let response = Authenticator::default().handle_cbor(&[CMD_AUTHENTICATOR_GET_INFO]);
+        let response = Authenticator::default().handle_cbor(&[Ctap2Command::GetInfo.byte()]);
         assert_eq!(response[0], 0x00);
         assert!(response.len() > 1);
     }
 
     #[test]
     fn get_info_uses_project_aaguid_and_algorithm_metadata() {
-        let response = Authenticator::default().handle_cbor(&[CMD_AUTHENTICATOR_GET_INFO]);
+        let response = Authenticator::default().handle_cbor(&[Ctap2Command::GetInfo.byte()]);
         let Value::Map(map) = ciborium::from_reader::<Value, _>(&response[1..]).expect("CBOR")
         else {
             panic!("expected getInfo map");
@@ -1198,7 +1221,7 @@ mod tests {
         );
 
         let response = authenticator.handle_cbor(&ctap_request(
-            CMD_AUTHENTICATOR_GET_ASSERTION,
+            Ctap2Command::GetAssertion,
             Value::Map(vec![
                 (
                     Value::Integer(1.into()),
@@ -1215,7 +1238,7 @@ mod tests {
         };
         assert_eq!(map_value(&map, 5), Some(&Value::Integer(2.into())));
 
-        let next = authenticator.handle_cbor(&[CMD_AUTHENTICATOR_GET_NEXT_ASSERTION]);
+        let next = authenticator.handle_cbor(&[Ctap2Command::GetNextAssertion.byte()]);
         assert_eq!(next[0], 0x00);
         let Value::Map(next_map) = ciborium::from_reader::<Value, _>(&next[1..]).expect("CBOR")
         else {
@@ -1239,7 +1262,7 @@ mod tests {
         let mut authenticator = Authenticator::default();
 
         let make_credential = ctap_request(
-            CMD_AUTHENTICATOR_MAKE_CREDENTIAL,
+            Ctap2Command::MakeCredential,
             Value::Map(vec![
                 (Value::Integer(1.into()), Value::Bytes(vec![0xaa; 32])),
                 (
@@ -1276,7 +1299,7 @@ mod tests {
         assert_eq!(authenticator.handle_cbor(&make_credential)[0], 0x12);
 
         let get_assertion = ctap_request(
-            CMD_AUTHENTICATOR_GET_ASSERTION,
+            Ctap2Command::GetAssertion,
             Value::Map(vec![
                 (
                     Value::Integer(1.into()),
@@ -1297,7 +1320,7 @@ mod tests {
         let mut authenticator = authenticator_with_credential("example.com", vec![1, 2, 3, 4]);
 
         let response = authenticator.handle_cbor(&ctap_request(
-            CMD_AUTHENTICATOR_GET_ASSERTION,
+            Ctap2Command::GetAssertion,
             Value::Map(vec![
                 (
                     Value::Integer(1.into()),
@@ -1316,7 +1339,7 @@ mod tests {
         let mut authenticator = Authenticator::default();
 
         let make_credential = ctap_request(
-            CMD_AUTHENTICATOR_MAKE_CREDENTIAL,
+            Ctap2Command::MakeCredential,
             Value::Map(vec![
                 (Value::Integer(1.into()), Value::Bytes(vec![0xaa; 31])),
                 (
@@ -1345,7 +1368,7 @@ mod tests {
         assert_eq!(authenticator.handle_cbor(&make_credential)[0], 0x12);
 
         let get_assertion = ctap_request(
-            CMD_AUTHENTICATOR_GET_ASSERTION,
+            Ctap2Command::GetAssertion,
             Value::Map(vec![
                 (
                     Value::Integer(1.into()),
@@ -1463,8 +1486,8 @@ mod tests {
         }
     }
 
-    fn ctap_request(command: u8, body: Value) -> Vec<u8> {
-        let mut payload = vec![command];
+    fn ctap_request(command: Ctap2Command, body: Value) -> Vec<u8> {
+        let mut payload = vec![command.byte()];
         ciborium::into_writer(&body, &mut payload).expect("serialize CTAP request");
         payload
     }

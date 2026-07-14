@@ -4,18 +4,44 @@ use crate::{ctap2, hid::REPORT_SIZE};
 
 pub const BROADCAST_CID: u32 = 0xffff_ffff;
 
-const CMD_PING: u8 = 0x01;
-const CMD_INIT: u8 = 0x06;
-const CMD_WINK: u8 = 0x08;
-const CMD_CBOR: u8 = 0x10;
-const CMD_CANCEL: u8 = 0x11;
-const CMD_ERROR: u8 = 0x3f;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum CtapHidCommand {
+    Ping = 0x01,
+    Init = 0x06,
+    Wink = 0x08,
+    Cbor = 0x10,
+    Cancel = 0x11,
+    Error = 0x3f,
+}
+
+impl CtapHidCommand {
+    fn from_byte(b: u8) -> Option<Self> {
+        match b {
+            0x01 => Some(Self::Ping),
+            0x06 => Some(Self::Init),
+            0x08 => Some(Self::Wink),
+            0x10 => Some(Self::Cbor),
+            0x11 => Some(Self::Cancel),
+            0x3f => Some(Self::Error),
+            _ => None,
+        }
+    }
+
+    fn byte(self) -> u8 {
+        self as u8
+    }
+}
 
 const TYPE_INIT: u8 = 0x80;
 
-const ERR_INVALID_COMMAND: u8 = 0x01;
-const ERR_INVALID_LENGTH: u8 = 0x03;
-const ERR_INVALID_SEQ: u8 = 0x04;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum CtapHidError {
+    Command = 0x01,
+    Length = 0x03,
+    Seq = 0x04,
+}
 
 const CAPABILITY_CBOR: u8 = 0x04;
 const CAPABILITY_NMSG: u8 = 0x08;
@@ -31,7 +57,7 @@ pub struct PacketHandler {
 #[derive(Debug)]
 struct PendingRequest {
     cid: u32,
-    command: u8,
+    command: CtapHidCommand,
     expected_len: usize,
     payload: Vec<u8>,
     next_sequence: u8,
@@ -75,8 +101,12 @@ impl PacketHandler {
         let payload_len = u16::from_be_bytes([report[5], report[6]]) as usize;
         if payload_len > MAX_PAYLOAD_SIZE {
             self.pending = None;
-            return Some(PacketOutcome::Response(error(cid, ERR_INVALID_LENGTH)));
+            return Some(PacketOutcome::Response(error(cid, CtapHidError::Length)));
         }
+
+        let Some(command) = CtapHidCommand::from_byte(command_id) else {
+            return Some(PacketOutcome::Response(error(cid, CtapHidError::Command)));
+        };
 
         let first_len = payload_len.min(REPORT_SIZE - 7);
         let mut payload = Vec::with_capacity(payload_len);
@@ -85,13 +115,13 @@ impl PacketHandler {
         if payload.len() == payload_len {
             self.pending = None;
             return Some(PacketOutcome::Response(
-                self.dispatch(cid, command_id, &payload),
+                self.dispatch(cid, command, &payload),
             ));
         }
 
         self.pending = Some(PendingRequest {
             cid,
-            command: command_id,
+            command,
             expected_len: payload_len,
             payload,
             next_sequence: 0,
@@ -110,7 +140,7 @@ impl PacketHandler {
         if pending.cid != cid || pending.next_sequence != sequence {
             let error_cid = pending.cid;
             self.pending = None;
-            return Some(PacketOutcome::Response(error(error_cid, ERR_INVALID_SEQ)));
+            return Some(PacketOutcome::Response(error(error_cid, CtapHidError::Seq)));
         }
 
         let remaining = pending.expected_len - pending.payload.len();
@@ -130,26 +160,26 @@ impl PacketHandler {
         }
     }
 
-    fn dispatch(&mut self, cid: u32, command_id: u8, payload: &[u8]) -> Response {
-        match command_id {
-            CMD_INIT => handle_init(cid, payload),
-            CMD_PING => Response {
+    fn dispatch(&mut self, cid: u32, command: CtapHidCommand, payload: &[u8]) -> Response {
+        match command {
+            CtapHidCommand::Init => handle_init(cid, payload),
+            CtapHidCommand::Ping => Response {
                 cid,
-                command: CMD_PING,
+                command: CtapHidCommand::Ping,
                 payload: payload.to_vec(),
             },
-            CMD_WINK => Response {
+            CtapHidCommand::Wink => Response {
                 cid,
-                command: CMD_WINK,
+                command: CtapHidCommand::Wink,
                 payload: Vec::new(),
             },
-            CMD_CBOR => Response {
+            CtapHidCommand::Cbor => Response {
                 cid,
-                command: CMD_CBOR,
+                command: CtapHidCommand::Cbor,
                 payload: self.authenticator.handle_cbor(payload),
             },
-            CMD_CANCEL => error(cid, ERR_INVALID_COMMAND),
-            _ => error(cid, ERR_INVALID_COMMAND),
+            CtapHidCommand::Cancel => error(cid, CtapHidError::Command),
+            CtapHidCommand::Error => error(cid, CtapHidError::Command),
         }
     }
 }
@@ -157,7 +187,7 @@ impl PacketHandler {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Response {
     pub cid: u32,
-    pub command: u8,
+    pub command: CtapHidCommand,
     pub payload: Vec<u8>,
 }
 
@@ -184,31 +214,30 @@ pub fn describe_report(report: &[u8]) -> String {
     let packet_type = report[4];
     if packet_type & TYPE_INIT != 0 {
         let payload_len = u16::from_be_bytes([report[5], report[6]]) as usize;
-        format!(
-            "init cid={cid:#010x} cmd={}({:#04x}) payload_len={payload_len}",
-            command_name(packet_type & !TYPE_INIT),
-            packet_type & !TYPE_INIT
-        )
+        let cmd_byte = packet_type & !TYPE_INIT;
+        let cmd_name = CtapHidCommand::from_byte(cmd_byte)
+            .map(command_name)
+            .unwrap_or("UNKNOWN");
+        format!("init cid={cid:#010x} cmd={cmd_name}({cmd_byte:#04x}) payload_len={payload_len}",)
     } else {
         format!("cont cid={cid:#010x} seq={packet_type}")
     }
 }
 
-pub fn command_name(command: u8) -> &'static str {
+pub fn command_name(command: CtapHidCommand) -> &'static str {
     match command {
-        CMD_PING => "PING",
-        CMD_INIT => "INIT",
-        CMD_WINK => "WINK",
-        CMD_CBOR => "CBOR",
-        CMD_CANCEL => "CANCEL",
-        CMD_ERROR => "ERROR",
-        _ => "UNKNOWN",
+        CtapHidCommand::Ping => "PING",
+        CtapHidCommand::Init => "INIT",
+        CtapHidCommand::Wink => "WINK",
+        CtapHidCommand::Cbor => "CBOR",
+        CtapHidCommand::Cancel => "CANCEL",
+        CtapHidCommand::Error => "ERROR",
     }
 }
 
 fn handle_init(cid: u32, payload: &[u8]) -> Response {
     if payload.len() != 8 {
-        return error(cid, ERR_INVALID_LENGTH);
+        return error(cid, CtapHidError::Length);
     }
 
     let allocated_cid = if cid == BROADCAST_CID { 1 } else { cid };
@@ -221,24 +250,24 @@ fn handle_init(cid: u32, payload: &[u8]) -> Response {
 
     Response {
         cid,
-        command: CMD_INIT,
+        command: CtapHidCommand::Init,
         payload: response,
     }
 }
 
-fn error(cid: u32, code: u8) -> Response {
+fn error(cid: u32, code: CtapHidError) -> Response {
     Response {
         cid,
-        command: CMD_ERROR,
-        payload: vec![code],
+        command: CtapHidCommand::Error,
+        payload: vec![code as u8],
     }
 }
 
-fn encode_message(cid: u32, command: u8, payload: &[u8]) -> Vec<[u8; REPORT_SIZE]> {
+fn encode_message(cid: u32, command: CtapHidCommand, payload: &[u8]) -> Vec<[u8; REPORT_SIZE]> {
     let mut packets = Vec::new();
     let mut first = [0u8; REPORT_SIZE];
     first[0..4].copy_from_slice(&cid.to_be_bytes());
-    first[4] = command | TYPE_INIT;
+    first[4] = command.byte() | TYPE_INIT;
     first[5..7].copy_from_slice(&(payload.len() as u16).to_be_bytes());
 
     let first_len = payload.len().min(REPORT_SIZE - 7);
@@ -268,7 +297,7 @@ mod tests {
     fn init_packet() -> [u8; REPORT_SIZE] {
         let mut packet = [0u8; REPORT_SIZE];
         packet[0..4].copy_from_slice(&BROADCAST_CID.to_be_bytes());
-        packet[4] = CMD_INIT | TYPE_INIT;
+        packet[4] = CtapHidCommand::Init.byte() | TYPE_INIT;
         packet[5..7].copy_from_slice(&8u16.to_be_bytes());
         packet[7..15].copy_from_slice(b"12345678");
         packet
@@ -277,7 +306,7 @@ mod tests {
     #[test]
     fn init_allocates_channel() {
         let response = handle_packet(&init_packet()).expect("response");
-        assert_eq!(response.command, CMD_INIT);
+        assert_eq!(response.command, CtapHidCommand::Init);
         assert_eq!(&response.payload[0..8], b"12345678");
         assert_eq!(&response.payload[8..12], &1u32.to_be_bytes());
         assert_eq!(response.payload[12], 2);
@@ -291,7 +320,7 @@ mod tests {
 
         let mut first = [0u8; REPORT_SIZE];
         first[0..4].copy_from_slice(&7u32.to_be_bytes());
-        first[4] = CMD_PING | TYPE_INIT;
+        first[4] = CtapHidCommand::Ping.byte() | TYPE_INIT;
         first[5..7].copy_from_slice(&(payload.len() as u16).to_be_bytes());
         first[7..].copy_from_slice(&payload[..REPORT_SIZE - 7]);
 
@@ -305,7 +334,7 @@ mod tests {
         let Some(PacketOutcome::Response(response)) = handler.handle_packet(&second) else {
             panic!("expected response");
         };
-        assert_eq!(response.command, CMD_PING);
+        assert_eq!(response.command, CtapHidCommand::Ping);
         assert_eq!(response.payload, payload);
     }
 
@@ -313,13 +342,13 @@ mod tests {
     fn ping_echoes_payload() {
         let mut packet = [0u8; REPORT_SIZE];
         packet[0..4].copy_from_slice(&7u32.to_be_bytes());
-        packet[4] = CMD_PING | TYPE_INIT;
+        packet[4] = CtapHidCommand::Ping.byte() | TYPE_INIT;
         packet[5..7].copy_from_slice(&3u16.to_be_bytes());
         packet[7..10].copy_from_slice(b"abc");
 
         let response = handle_packet(&packet).expect("response");
         assert_eq!(response.cid, 7);
-        assert_eq!(response.command, CMD_PING);
+        assert_eq!(response.command, CtapHidCommand::Ping);
         assert_eq!(response.payload, b"abc");
     }
 
@@ -327,12 +356,12 @@ mod tests {
     fn response_packets_use_init_command_byte() {
         let response = Response {
             cid: 9,
-            command: CMD_PING,
+            command: CtapHidCommand::Ping,
             payload: b"abc".to_vec(),
         };
         let packets = response.packets();
         assert_eq!(packets.len(), 1);
-        assert_eq!(packets[0][4], CMD_PING | TYPE_INIT);
+        assert_eq!(packets[0][4], CtapHidCommand::Ping.byte() | TYPE_INIT);
         assert_eq!(&packets[0][7..10], b"abc");
     }
 }

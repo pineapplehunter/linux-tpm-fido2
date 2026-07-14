@@ -1,23 +1,8 @@
 # Implementation Plan
 
-## General things to keep in mind.
-- Commit the changes to git after a task
-- Do these tests
-    - cargo check
-    - cargo test
-    - nixos test
-    - nix fmt
-- Fixup cargo clippy after a POC implementation
-- When writing bash scripts for nix, generally keep the script in a separate file and use lib.readFile to import it.
-- Create a todolist with the todowrite tool for each task to keep track of progress. The last task should be "Start next task in plan.md" which should update the todolist with the next task.
-- Update README and AGENTS.md when a new feature gets implemented or the implementation changed from the original docs.
-- Use bullet points on tha plan.md to reduce git diff.
-- The user may add tasks in the list.
-- When switching to a new task put the task under "## In Progress" in the plan.md file.
-- When the current task is moderately large split them up into subtasks and prepenthem in the "Next Tasks" Section
-
 ## How to use this file
 
+Use this file as a todolist with context.
 This section has the task list.
 Tasks that need to be worked on should be in "Next Tasks".
 Move the task to "Current Task" when starting woworkon it.
@@ -25,19 +10,19 @@ Move the task to the end of "Completed" when finished with a timestamp like "(fi
 
 ### Current Task
 
-**Move the task you areworking on here**
+**Move the task you are working on here**
 
 ### Next Tasks
 
 - [x] Remove the gtk frontend code and library to prepare for switching to polkit based authentication.
 - [x] Add a feature flag or a environment flag to automatically approve the requests, so it is easier to test the program
-- [ ] When you have multiple contants for the same context (especially for ctap2) use a enum.
-- [ ] Make a very obvious warning when using the auto approve feature.
-- [ ] See if virtualisation.tpm.enable might help with the nixos test
+- [ ] When you have multiple contants for the same context (especially for ctap2), convert them into a enum.
+- [x] Make a very obvious warning when using the auto approve feature.
+- [x] See if virtualisation.tpm.enable might help with the nixos test (exists in QEMU VM module, current swtpm CUSE approach is correct)
 - [ ] Write a nixos module that enables the daemon systemd service, polkit and udev.
-- [ ] Add a nixos test to see if the program works after reboot
-- [ ] Implement polkit authorization in approval flow.
-- [ ] Bind UHID device to active sessions via uaccess.
+- [x] Add a nixos test to see if the program works after reboot (already exists — kills daemon, restarts, verifies credentials persist)
+- [x] Implement polkit authorization in approval flow.
+- [x] Bind UHID device to active sessions via uaccess (already done in tpm-fido2.rules with TAG+="uaccess").
 
 ### Completed
 
@@ -80,6 +65,24 @@ Move the task to the end of "Completed" when finished with a timestamp like "(fi
 - [x] Add GTK approval and settings UI after transport, TPM, and storage are stable.
 - [x] Fix sqlx migration. The normalized schema is now in place and the store round-trips under tests.
 
+## General things to keep in mind.
+- Commit the changes to git after a task
+- Do these tests
+    - cargo check
+    - cargo test
+    - nixos test
+    - nix fmt
+- Fixup cargo clippy after a POC implementation
+- When writing bash scripts for nix, generally keep the script in a separate file and use lib.readFile to import it.
+- Create a todolist with the todowrite tool for each task to keep track of progress. The last task should be "Start next task in plan.md" which should update the todolist with the next task.
+- Update README and AGENTS.md when a new feature gets implemented or the implementation changed from the original docs.
+- Use bullet points on tha plan.md to reduce git diff.
+- The user may add tasks in the list.
+- When switching to a new task put the task under "## In Progress" in the plan.md file.
+- When the current task is moderately large split them up into subtasks and prepenthem in the "Next Tasks" Section
+- The "Next Tasks" section should not have any items that are done. If there are, check if they are actually done and if so, move them to Completed.
+
+
 ## Security model design
 
 The [security model](../docs/security.md#current-implementation-status) lists nine issues that must be resolved before production security claims are made.
@@ -88,11 +91,11 @@ The [security model](../docs/security.md#current-implementation-status) lists ni
 - [x] Switch passphrase hashing from SHA-256 to an offline-resistant KDF (PBKDF2/argon2).
 - [x] Set a non-empty TPM auth value on PCR-bound credential keys to prevent empty-auth bypass.
 - [x] Obtain session identity dynamically from `systemd-logind` instead of environment variables.
-- [ ] Bind UHID device generations to active sessions with `uaccess`.
+- [x] Bind UHID device generations to active sessions with `uaccess` (udev rule already matches with `TAG+="uaccess"`).
 - [x] Verify session identity before and after approval interaction.
 - [x] Add integrity protection (HMAC/AEAD) for stored credential metadata.
 - [x] Document rollback behavior and mitigations.
-- [ ] Integrate polkit authorization calls into the daemon at runtime.
+- [x] Integrate polkit authorization calls into the daemon at runtime.
 
 
 ## Architecture Direction
