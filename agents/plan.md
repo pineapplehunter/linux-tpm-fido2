@@ -19,7 +19,7 @@
 
 ## Next Tasks
 
-- [ ] Remove the gtk frontend code and library to prepare for switching to polkit based authentication.
+- [x] Remove the gtk frontend code and library to prepare for switching to polkit based authentication.
 - [ ] Start implementation according to the "Security model design" section in this document.
 - [ ] Start next task in plan.md
 
@@ -60,7 +60,7 @@
 - [x] `security.md` captures the current threat model, mitigations, and future work.
 - [x] CTAP2 requests with `up=false` are rejected instead of silently continuing.
 - [x] README focuses on project purpose, usage, features, and future work.
-- [x] GTK app now uses libadwaita application and window types.
+- [x] GTK frontend removed; approval falls back to stdin/stdout; polkit integration planned.
 - [x] Add GTK approval and settings UI after transport, TPM, and storage are stable.
 - [x] Fix sqlx migration. The normalized schema is now in place and the store round-trips under tests.
 

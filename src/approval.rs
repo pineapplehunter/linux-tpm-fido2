@@ -78,8 +78,8 @@ fn approve_via_ipc(
 mod tests {
     use super::approve;
     use crate::{
-        gtk_ui::UiSettings,
         ipc,
+        ipc::UiSettings,
         session::{DaemonSessionModel, SessionContext},
     };
     use std::{

@@ -12,7 +12,7 @@ use std::{
 use color_eyre::{Result, eyre::WrapErr};
 use serde::{Deserialize, Serialize};
 
-use crate::{gtk_ui::UiSettings, session::SessionContext};
+use crate::session::SessionContext;
 
 pub const CONTROL_SOCKET_FILE: &str = "control.sock";
 
@@ -269,16 +269,54 @@ fn peer_credentials(stream: &UnixStream) -> Option<PeerProcessInfo> {
     None
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiSettings {
+    pub pinned_relying_parties: Vec<String>,
+    pub recovery_label: String,
+}
+
+impl Default for UiSettings {
+    fn default() -> Self {
+        Self {
+            pinned_relying_parties: Vec::new(),
+            recovery_label: "recovery slot".to_owned(),
+        }
+    }
+}
+
+pub fn ui_settings_path_in_dir(dir: impl AsRef<Path>) -> PathBuf {
+    dir.as_ref().join("ui-settings.toml")
+}
+
+pub fn load_ui_settings_from_dir(dir: impl AsRef<Path>) -> color_eyre::Result<UiSettings> {
+    let path = ui_settings_path_in_dir(dir.as_ref());
+    if !path.exists() {
+        return Ok(UiSettings::default());
+    }
+
+    let raw = fs::read_to_string(&path)
+        .wrap_err_with(|| format!("reading settings from {}", path.display()))?;
+    toml::from_str(&raw).wrap_err_with(|| format!("parsing settings from {}", path.display()))
+}
+
+pub fn save_ui_settings_to_dir(
+    dir: impl AsRef<Path>,
+    settings: &UiSettings,
+) -> color_eyre::Result<()> {
+    let path = ui_settings_path_in_dir(dir.as_ref());
+    let raw = toml::to_string_pretty(settings).wrap_err("serializing settings to TOML")?;
+    fs::create_dir_all(dir.as_ref())
+        .wrap_err_with(|| format!("creating {}", dir.as_ref().display()))?;
+    fs::write(&path, raw).wrap_err_with(|| format!("writing settings to {}", path.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        ApprovalPrompt, CONTROL_SOCKET_FILE, IpcRequest, IpcResponse, control_socket_path_in_dir,
-        start_control_socket_server,
+        ApprovalPrompt, CONTROL_SOCKET_FILE, IpcRequest, IpcResponse, UiSettings,
+        control_socket_path_in_dir, start_control_socket_server,
     };
-    use crate::{
-        gtk_ui::UiSettings,
-        session::{DaemonSessionModel, SessionContext},
-    };
+    use crate::session::{DaemonSessionModel, SessionContext};
     use std::{
         sync::{Arc, Mutex},
         time::{SystemTime, UNIX_EPOCH},

@@ -53,8 +53,6 @@
             env.SQLX_OFFLINE = "true";
 
             packages = with pkgs; [
-              libadwaita
-              gtk4
               pkg-config
               rustPlatform.bindgenHook
               sqlx-cli

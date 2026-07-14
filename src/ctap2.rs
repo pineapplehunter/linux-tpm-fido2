@@ -1414,7 +1414,7 @@ mod tests {
 
     fn start_auto_approval_ipc(store_dir: &Path) {
         let settings =
-            std::sync::Arc::new(std::sync::Mutex::new(crate::gtk_ui::UiSettings::default()));
+            std::sync::Arc::new(std::sync::Mutex::new(crate::ipc::UiSettings::default()));
         let server_uid = Some(1000);
         let _ = crate::ipc::start_control_socket_server(store_dir, settings, server_uid, None)
             .expect("start auto-approval IPC server");

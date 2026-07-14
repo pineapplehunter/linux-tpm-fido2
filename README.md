@@ -27,12 +27,6 @@ Daemon:
 linux-tpm-fido2 --store-dir .linux-tpm-fido2-store --tpm-path /dev/tpmrm0 --uhid-path /dev/uhid
 ```
 
-GTK control surface:
-
-```sh
-linux-tpm-fido2-ui --store-dir .linux-tpm-fido2-store
-```
-
 Useful flags:
 
 - `--dry-run` on the daemon prints the resolved configuration without opening devices.

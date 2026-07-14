@@ -2,8 +2,6 @@
   lib,
   rustPlatform,
   pkg-config,
-  libadwaita,
-  gtk4,
   tpm2-tss,
 }:
 rustPlatform.buildRustPackage {
@@ -34,8 +32,6 @@ rustPlatform.buildRustPackage {
   ];
 
   buildInputs = [
-    libadwaita
-    gtk4
     tpm2-tss
   ];
 
