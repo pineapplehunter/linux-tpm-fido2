@@ -1,56 +1,282 @@
-# Security
+# Security Model
 
-## Scope
+This document defines the threat model, security objectives, assumptions, and known limitations of `linux-tpm-fido2`.
 
-This project is an experimental TPM-backed FIDO2/WebAuthn authenticator daemon with a GTK control surface and a local SQLite store.
+The project is experimental. Unless explicitly identified as an implemented property, the requirements described in this document represent design objectives rather than verified security guarantees.
 
-## Assets
+## System Model
 
-- TPM private blobs for CTAP2 credentials.
-- TPM private blobs for recovery key material.
-- PCR policy bindings.
-- Credential metadata and sign counters in SQLite.
-- UI settings in `ui-settings.toml`.
-- Approval decisions and session identity.
+`linux-tpm-fido2` implements a virtual CTAP2 authenticator using the Linux UHID subsystem. A privileged daemon processes CTAPHID and CTAP2 requests, stores credential records in a local database, and delegates credential private-key operations to a TPM 2.0 device.
 
-## Trust Boundaries
+The daemon may manage credentials belonging to multiple local users. Each virtual HID device instance is associated with a specific active graphical session and user ID. Desktop authentication is requested through polkit.
 
-- Browser to UHID/CTAPHID/CTAP2 request path.
-- Daemon to TPM device access.
-- Daemon to SQLite store access.
-- Daemon to GTK control surface IPC.
-- Local desktop session identity and approval prompts.
+## Security-Relevant Entities
 
-## Threats
+* **Relying Party (RP):** The remote service that registers a credential and verifies authentication assertions.
+* **Client:** The browser or other CTAP client that communicates with the virtual authenticator.
+* **Daemon:** The privileged `linux-tpm-fido2` process that implements the virtual authenticator.
+* **TPM:** The TPM 2.0 device that generates, protects, and uses credential private keys.
+* **Credential Store:** The persistent database containing TPM object blobs, public-key material, credential metadata, policy information, and signature counters.
+* **Session Manager:** `systemd-logind`, which identifies the active local graphical session and its user ID.
+* **Authorization Service:** polkit and the graphical polkit authentication agent.
+* **Device-Access Mechanism:** udev and `uaccess`, which grant access to the virtual HID device to the active user of the associated seat.
+* **Platform Trust Chain:** The firmware, bootloader, kernel, and measured-boot components that determine relevant PCR values.
 
-- Malicious web page or browser origin attempting unauthorized credential creation or assertion.
-- Local unprivileged user trying to read or tamper with the credential store.
-- Local process trying to talk to the GTK control socket and influence settings or approvals.
-- Replay or reuse of stale approval state.
-- TPM or firmware compromise that undermines credential secrecy.
-- Physical machine compromise that exposes the store directory or the TPM device.
+A PCR is a TPM state register and is not considered an independent actor.
 
-## Current Mitigations
+## Adversary Model
 
-- Browser requests are constrained by CTAP2 parsing, allow/exclude list handling, clientDataHash validation, and user approval prompts.
-- Credentials are TPM-backed rather than software-key backed.
-- Secure-boot PCR policy can bind credentials to boot state.
-- Recovery material remains TPM-bound and is stored separately from the main credential metadata.
-- Sign counters are persisted after successful assertions.
-- The GTK control surface stores settings in a dedicated TOML file and exposes a Unix-socket seam in the store directory.
+### Unprivileged Cross-User Adversary
 
-## Known Gaps
+A cross-user adversary controls one or more processes under a local UID different from the credential owner’s UID.
 
-- The daemon-side GTK IPC auth story now checks Unix peer credentials, but broader policy review is still warranted.
-- The session/user binding model is still evolving.
-- The approval path is still partially terminal-driven in the daemon.
-- The store layout is still development-oriented and not hardened for production use.
-- There is no claim of FIDO certification compatibility or production-grade security.
+This adversary may:
 
-## Future Work
+* Read files that are accessible to its UID.
+* Attempt to open or communicate with the virtual HID device.
+* Attempt to invoke daemon interfaces.
+* Supply malformed or adversarial CTAPHID and CTAP2 messages.
+* Attempt to tamper with inadequately protected persistent state.
 
-- Define and enforce IPC authentication for the GTK control socket. The current server now checks peer credentials and rejects unauthorized clients.
-- Decide between per-user daemon, per-session helper, or another user-namespace strategy.
-- Add explicit permission checks around any approval/settings API.
-- Consider stronger anti-rollback or monotonic counter strategies if the threat model requires it.
-- Revisit storage encryption and recovery-token handling before production use.
+The design aims to prevent this adversary from using another user’s credentials.
+
+### Same-User Adversary
+
+A same-user adversary controls a process running under the credential owner’s UID.
+
+Because `uaccess` grants device access at UID granularity, the daemon cannot distinguish an authorized browser from another process running under the same UID solely through UHID.
+
+A same-user adversary may therefore initiate CTAP operations. Transaction-specific user interaction is required to limit unauthorized use, but this does not provide protection after the user approves a misleading or insufficiently identified request.
+
+### Privileged Adversary
+
+A privileged adversary has administrative control over the running operating system.
+
+This adversary may:
+
+* Read or modify the credential database.
+* Replace or modify the daemon.
+* Access the TPM resource-manager device.
+* Bypass session-selection and desktop-authorization logic.
+* Initiate arbitrary TPM commands permitted by the TPM hierarchy and object policies.
+* Observe or modify passphrases entered through software controlled by the operating system.
+
+The project does not claim to preserve user isolation, user acknowledgement, or authorization semantics against a live privileged adversary.
+
+TPM object properties may continue to prevent extraction of credential private keys. However, private-key non-extractability does not imply that a privileged adversary cannot cause the TPM to use a key.
+
+### Offline Storage Adversary
+
+An offline storage adversary can read or modify the persistent credential store but cannot execute commands using the original TPM.
+
+The design aims to prevent this adversary from extracting credential private keys and to detect unauthorized modification of security-sensitive records.
+
+### Out-of-Scope Adversaries
+
+The following are outside the primary threat model:
+
+* Physical attacks against the TPM.
+* TPM firmware compromise.
+* Firmware or hardware supply-chain compromise.
+* Kernel compromise that occurs before the daemon establishes its security state.
+* Side-channel attacks against the TPM or host processor.
+* Denial of service by a privileged adversary.
+
+## Terminology
+
+### Extractable
+
+A credential private key is **extractable** when an adversary can reconstruct or export the raw private-key value for use outside the original TPM.
+
+### Operationally Usable
+
+A credential private key is **operationally usable** when an adversary can cause the TPM to produce a valid signature using that key, regardless of whether the raw private key can be extracted.
+
+These properties are distinct. A TPM key may be non-extractable while remaining operationally usable by an adversary with sufficient authorization.
+
+## Operating Modes
+
+The intended design defines a base protection mechanism with optional, composable authorization factors.
+
+### TPM-Bound Base
+
+All credentials are generated by and bound to the TPM. The private key remains non-extractable and all cryptographic operations involving the private key are performed within the TPM.
+
+In this base configuration, no additional authorization factors are required beyond those inherent to the TPM object. This provides protection against key extraction but does not prevent an adversary with sufficient access to the TPM from using the key.
+
+### Authorization Factors
+
+Additional authorization factors may be applied independently or in combination to strengthen credential protection.
+
+#### PCR-Bound Authorization
+
+The credential private key may be protected by a TPM authorization policy associated with one or more enrolled PCR values.
+
+PCRs represent measured platform state, including firmware, bootloader, kernel, and Secure Boot configuration. They do not, by themselves, attest to the integrity of all software components, including the daemon or root filesystem.
+
+For systems using Secure Boot, it is strongly recommended to bind credentials to both:
+
+* **PCR[1] (firmware measurements):** This PCR reflects firmware code and configuration. Binding to PCR[1] ensures that credentials are only usable when the platform firmware matches the enrolled state.
+* **PCR[7] (Secure Boot policy):** This PCR reflects Secure Boot state and verification authorities (e.g., PK, KEK, db, dbx). Binding to PCR[7] ensures that credentials are only usable when Secure Boot is enabled and configured as expected.
+
+Combining PCR[1] and PCR[7] provides stronger guarantees than using PCR[7] alone. PCR[7] ensures that Secure Boot policy has not changed, while PCR[1] helps ensure that the firmware itself has not been modified. This combination is commonly used in disk encryption systems (e.g., LUKS2 with TPM binding) to protect secrets against firmware tampering and Secure Boot policy changes.
+
+However, several limitations must be considered:
+
+* PCR values reflect measurements, not trust. An enrolled PCR state is only “known good” if it has been independently validated.
+* Firmware updates, Secure Boot key changes, or bootloader updates will change PCR values and may render credentials unusable.
+* PCR binding does not guarantee integrity of user-space components such as the daemon or applications unless additional mechanisms (e.g., measured boot with IMA or unified kernel images) are used.
+
+An enrolled PCR value is treated as an authorized state. It is considered “known good” only when it has been independently validated against an expected platform configuration.
+
+A recovery mechanism may be defined to authorize migration to a new accepted PCR state.
+
+#### Passphrase-Based Authorization
+
+Use of the credential private key may require an authorization secret derived from a user-supplied passphrase.
+
+The passphrase shall be processed using a costed password-based key derivation function. A fast hash of the passphrase is insufficient because it permits inexpensive offline guessing after credential-store disclosure.
+
+The passphrase mechanism must authorize the same private key that was registered with the relying party. Creating an unrelated recovery signing key does not recover the original WebAuthn credential.
+
+#### Combined Authorization Policies
+
+PCR-based and passphrase-based authorization mechanisms may be combined within a single TPM policy. For example, a credential may require both a valid PCR state and a correct passphrase, or may allow either condition through a policy branch.
+
+The exact composition of these policies determines the effective security properties and recovery behavior of the credential.
+
+## Security Objectives
+
+### Private-Key Confidentiality
+
+All credential private keys shall be generated by the TPM and shall remain non-extractable from the TPM under the assumed threat model.
+
+Operations that require possession of a credential private key, including WebAuthn assertion signatures, shall be performed by the TPM.
+
+The persistent credential store may contain TPM private and public object blobs. Disclosure of these blobs shall not reveal the raw credential private key without access to the originating TPM and satisfaction of the applicable TPM authorization policy.
+
+Credential metadata is not necessarily confidential. Depending on the database format, disclosure may reveal:
+
+* Relying-party identifiers.
+* User names and display names.
+* User handles.
+* Credential identifiers.
+* Public keys.
+* Signature counters.
+* Policy configuration and recovery metadata.
+
+### User Isolation
+
+Each UHID device generation shall be associated with one active local graphical session, seat, and UID.
+
+Access to the corresponding `hidraw` device shall be restricted through udev and `uaccess` to the active UID of that seat.
+
+The daemon shall destroy and recreate the UHID device when the active session changes. Removing an ACL alone is insufficient because an already-open file descriptor may remain usable.
+
+Before selecting or using a credential, the daemon shall verify that:
+
+1. The request belongs to the current UHID device generation.
+2. The associated session remains active.
+3. The session UID matches the credential owner’s UID.
+4. The polkit authorization applies to the same session.
+5. The session identity remains unchanged after interactive authorization completes.
+
+These controls provide separation between different local UIDs. They do not distinguish processes running under the same UID.
+
+### User Authorization
+
+Interactive authorization shall be requested against the selected active graphical session.
+
+A successful polkit operation establishes that the session user satisfied the configured polkit policy. Polkit authentication is not equivalent to an arbitrary graphical Allow/Deny acknowledgement.
+
+Authorization shall be associated with one specific CTAP transaction. Authorization results shall not be reused for unrelated requests unless the reuse semantics are explicitly defined and justified.
+
+Cancellation, timeout, session termination, session switching, or failure of the authentication agent shall cause the operation to fail closed.
+
+The authenticator cannot independently verify the browser’s web origin. It receives an RP ID and client-data hash from the client platform and relies on the WebAuthn client and relying party to perform the corresponding origin validation.
+
+### Persistent-State Integrity
+
+Unauthorized modification of security-sensitive credential records should be detectable.
+
+The authenticated record should include, at minimum:
+
+* Credential ID.
+* Credential-owner UID.
+* RP ID.
+* User handle.
+* TPM private and public blobs.
+* Credential public key.
+* TPM object attributes.
+* PCR selection and policy digest.
+* Authorization factors applied.
+* Recovery-policy metadata.
+* Password-KDF algorithm and parameters.
+* Signature-counter state.
+
+Integrity protection may be implemented using an HMAC or authenticated-encryption key whose use is restricted by the TPM.
+
+Such protection does not provide integrity against a privileged adversary that is authorized to use the integrity key.
+
+### Rollback Resistance
+
+The current design does not provide rollback protection.
+
+An adversary capable of restoring an older valid database may be able to:
+
+* Restore a deleted credential.
+* Revert a signature counter.
+* Restore obsolete policy or recovery information.
+* Undo credential revocation or rotation.
+
+Rollback detection would require additional monotonic state, such as a TPM NV counter or another trusted version mechanism.
+
+### Availability
+
+The system does not provide unconditional availability.
+
+Credential use depends on the continued availability and consistency of:
+
+* The original TPM and its hierarchy state.
+* The TPM object blobs.
+* The credential database.
+* The required authorization factors (e.g., PCR state or passphrase).
+* The session manager.
+* The polkit service and graphical authentication agent.
+* The UHID and hidraw subsystems.
+
+When PCR-bound authorization is used, changes to measured platform state may prevent normal credential use. Recovery is possible only if a recovery mechanism for the original credential key has been implemented and remains available.
+
+When passphrase-based authorization is used, possession of the correct passphrase does not guarantee recovery if the TPM has been cleared, the credential record is corrupted, or the original TPM is unavailable.
+
+In the TPM-bound base configuration without additional authorization factors, the credential is expected to remain usable while the original TPM, object blobs, and required TPM hierarchy remain available.
+
+## Denial-of-Service Considerations
+
+An unprivileged process with access to the virtual HID device may attempt to:
+
+* Submit malformed or incomplete CTAPHID messages.
+* Exhaust CTAPHID channels.
+* Generate repeated authorization prompts.
+* Hold the device open across session transitions.
+* Cause excessive TPM operations.
+
+The daemon should implement bounded request sizes, per-channel state limits, request timeouts, cancellation, prompt rate limiting, and limits on concurrent interactive operations.
+
+## Current Implementation Status
+
+The current source tree is experimental and does not yet satisfy all properties defined by this document.
+
+Before production security claims are made, at least the following issues must be resolved:
+
+* TPM keys protected exclusively by PCR policy must not retain an empty authorization-value bypass.
+* Recovery must authorize the original registered credential key rather than an independent signing key.
+* Passphrases must be protected using an offline-resistant password KDF.
+* Session identity must be obtained dynamically from `systemd-logind` rather than inherited environment variables.
+* UHID device generations must be bound to active sessions using `uaccess`.
+* Authorization must be performed against the same session before and after interaction.
+* Security-sensitive credential metadata must receive integrity protection.
+* Approval reuse and stale authorization state must be eliminated or formally justified.
+* Rollback behavior must be documented and, where required, mitigated.
+
+No FIDO certification, production hardening, or resistance to a live privileged adversary is currently claimed.
