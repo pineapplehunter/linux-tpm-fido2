@@ -72,13 +72,15 @@ pub fn launch(config: GtkUiConfig) -> Result<()> {
     app.connect_activate(move |app| {
         build_ui(
             app,
-            &session,
-            &config.store_dir,
-            &credentials,
-            &settings,
-            settings_state.clone(),
-            approval_state.clone(),
-            &socket_path,
+            UiLaunchContext {
+                session: &session,
+                store_dir: &config.store_dir,
+                credentials: &credentials,
+                settings: &settings,
+                settings_state: settings_state.clone(),
+                approval_state: approval_state.clone(),
+                socket_path: &socket_path,
+            },
         );
     });
 
@@ -133,16 +135,17 @@ pub fn save_ui_settings_to_dir(dir: impl AsRef<Path>, settings: &UiSettings) -> 
     fs::write(&path, raw).wrap_err_with(|| format!("writing GTK settings to {}", path.display()))
 }
 
-fn build_ui(
-    app: &adw::Application,
-    session: &session::SessionContext,
-    store_dir: &Path,
-    credentials: &[CredentialSummary],
-    settings: &UiSettings,
+struct UiLaunchContext<'a> {
+    session: &'a session::SessionContext,
+    store_dir: &'a Path,
+    credentials: &'a [CredentialSummary],
+    settings: &'a UiSettings,
     settings_state: Arc<Mutex<UiSettings>>,
     approval_state: Arc<ipc::ApprovalPromptState>,
-    socket_path: &Path,
-) {
+    socket_path: &'a Path,
+}
+
+fn build_ui(app: &adw::Application, ctx: UiLaunchContext<'_>) {
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("linux-tpm-fido2")
@@ -154,16 +157,16 @@ fn build_ui(
     notebook.set_hexpand(true);
     notebook.set_vexpand(true);
 
-    let approval_page = build_approval_page(session);
+    let approval_page = build_approval_page(ctx.session);
     let approval_label = Label::new(Some("Approval"));
     notebook.append_page(&approval_page, Some(&approval_label));
 
     let settings_page = build_settings_page(
-        store_dir,
-        credentials,
-        settings,
-        settings_state,
-        socket_path,
+        ctx.store_dir,
+        ctx.credentials,
+        ctx.settings,
+        ctx.settings_state,
+        ctx.socket_path,
     );
     let settings_label = Label::new(Some("Settings"));
     notebook.append_page(&settings_page, Some(&settings_label));
@@ -171,7 +174,7 @@ fn build_ui(
     window.set_content(Some(&notebook));
     window.present();
 
-    let prompt_window = build_prompt_window(app, &window, session, approval_state);
+    let prompt_window = build_prompt_window(app, &window, ctx.session, ctx.approval_state);
     prompt_window.hide();
 }
 
@@ -273,7 +276,12 @@ fn build_prompt_window(
         let window = window.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(150), move || {
             if let Some(prompt) = approval_state.snapshot() {
-                prompt_label.set_text(&format!("{}\n{}", prompt.session.describe(), prompt.prompt));
+                let mut details = vec![prompt.session.describe()];
+                if let Some(peer) = &prompt.peer {
+                    details.push(format!("peer {}", peer.describe()));
+                }
+                details.push(prompt.prompt);
+                prompt_label.set_text(&details.join("\n"));
                 result_label.set_text("Waiting for user action.");
                 if !window.is_visible() {
                     window.present();

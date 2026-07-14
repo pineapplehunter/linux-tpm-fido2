@@ -46,6 +46,7 @@ fn approve_via_ipc(
     let request = IpcRequest::PromptApproval(ApprovalPrompt {
         session: session.clone(),
         prompt: prompt.to_owned(),
+        peer: None,
     });
 
     match ipc::send_request(&socket_path, &request) {

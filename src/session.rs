@@ -2,8 +2,9 @@ use std::env;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum DaemonSessionModel {
+    #[default]
     ActiveGraphicalSession,
     PerUserDaemon,
     SystemBroker,
@@ -16,12 +17,6 @@ impl DaemonSessionModel {
             Self::PerUserDaemon => "per-user-daemon",
             Self::SystemBroker => "system-broker",
         }
-    }
-}
-
-impl Default for DaemonSessionModel {
-    fn default() -> Self {
-        Self::ActiveGraphicalSession
     }
 }
 

@@ -1,6 +1,6 @@
 # Implementation Plan
 
-## Generel things to keep in mind.
+## General things to keep in mind.
 - Commit the changes to git after a task
 - Do these tests
     - cargo check
@@ -14,7 +14,16 @@
 - Use bullet points on tha plan.md to reduce git diff.
 - The user may add tasks in the list.
 - When switching to a new task put the task under "## In Progress" in the plan.md file.
+- When a task is finished and moved to Completed, write the time the task finished
 
+
+
+
+## Next
+
+- [ ] Remove the gtk frontend code and library to prepare for switching to polkit based authentication.
+- [ ] Start implementation according to the "Security model design" section in this document.
+- [ ] Start next task in plan.md
 
 ## Completed
 
@@ -57,16 +66,19 @@
 - [x] Add GTK approval and settings UI after transport, TPM, and storage are stable.
 - [x] Fix sqlx migration. The normalized schema is now in place and the store round-trips under tests.
 
-## In Progress
+## Security model design
 
-- [x] Add credential user_id storage and filter CTAP2 lookup by the active user.
-- [x] Prototype GNOME-style approval popup for register/auth flows.
-- [x] Define and enforce IPC authentication for the GTK control socket.
-- [x] Expand CTAP2 compatibility for additional browser request shapes.
+The [security model](../docs/security.md#current-implementation-status) lists nine issues that must be resolved before production security claims are made.
 
-## Next
-
-- [ ] Start next task in plan.md
+- [ ] Remove approval-reuse grace period in CTAP2 assertions.
+- [ ] Switch passphrase hashing from SHA-256 to an offline-resistant KDF (PBKDF2/argon2).
+- [ ] Set a non-empty TPM auth value on PCR-bound credential keys to prevent empty-auth bypass.
+- [ ] Obtain session identity dynamically from `systemd-logind` instead of environment variables.
+- [ ] Bind UHID device generations to active sessions with `uaccess`.
+- [ ] Verify session identity before and after approval interaction.
+- [ ] Add integrity protection (HMAC/AEAD) for stored credential metadata.
+- [ ] Document rollback behavior and mitigations.
+- [ ] Integrate polkit authorization calls into the daemon at runtime.
 
 
 ## Architecture Direction
@@ -77,14 +89,9 @@
 - `store` owns the development SQLite credential schema and migrations and will evolve toward production metadata.
 - `tpm` owns key creation/loading, signing, PCR policy sessions, recovery wrapping, and TPM capability checks.
 
-## Open Design Questions
-
-- The daemon should continue avoiding accidental cross-user credential sharing as GTK and session helpers are added.
-- TPM-backed credential storage currently uses one TPM child key per credential; the production parent/policy model still needs a deliberate design.
-
 ## Non-Goals For Now
 
 - No browser extension.
-- No GTK until the non-GUI authenticator works with TPM-backed credentials.
+- No GTK frontedn use polkit.
 - No claim of FIDO certification compatibility until the protocol is much more complete.
 - No production security claims for the development credential store.

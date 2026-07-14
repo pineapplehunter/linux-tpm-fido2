@@ -1,9 +1,4 @@
-use std::{
-    env,
-    path::PathBuf,
-    thread,
-    time::{Duration, Instant},
-};
+use std::{env, path::PathBuf, thread, time::Duration};
 
 use crate::{approval, session, store, tpm};
 use ciborium::value::Value;
@@ -34,7 +29,6 @@ impl From<ErrorStatus> for u8 {
 }
 
 const COSE_ALG_ES256: i64 = -7;
-const ASSERTION_APPROVAL_GRACE: Duration = Duration::from_secs(10);
 pub const AAGUID: [u8; 16] = [
     0x6c, 0x74, 0x70, 0x6d, 0xf1, 0xd0, 0x42, 0x00, 0x80, 0x01, 0x54, 0x50, 0x4d, 0x46, 0x49, 0x44,
 ];
@@ -45,13 +39,7 @@ pub struct Authenticator {
     tpm: Option<tpm::Tpm>,
     session: session::SessionContext,
     credentials: Vec<Credential>,
-    recent_assertion_approval: Option<RecentAssertionApproval>,
     pending_assertion: Option<PendingAssertion>,
-}
-
-struct RecentAssertionApproval {
-    rp_id: String,
-    expires_at: Instant,
 }
 
 struct PendingAssertion {
@@ -112,7 +100,6 @@ impl Authenticator {
             tpm,
             session,
             credentials,
-            recent_assertion_approval: None,
             pending_assertion: None,
         }
     }
@@ -484,9 +471,7 @@ impl Authenticator {
 
     fn ensure_tpm(&mut self) -> Option<&mut tpm::Tpm> {
         if self.tpm.is_none() {
-            let Some(path) = self.tpm_path.clone() else {
-                return None;
-            };
+            let path = self.tpm_path.clone()?;
 
             for attempt in 0..100 {
                 match tpm::Tpm::open(&path) {
@@ -516,30 +501,11 @@ impl Authenticator {
     }
 
     fn assertion_approved(&mut self, rp_id: &str) -> bool {
-        let now = Instant::now();
-        if self
-            .recent_assertion_approval
-            .as_ref()
-            .is_some_and(|approval| approval.rp_id == rp_id && approval.expires_at > now)
-        {
-            log::info!("reusing recent assertion approval for rp_id={rp_id}");
-            return true;
-        }
-
-        if !approval::approve(
+        approval::approve(
             &format!("Authenticate with passkey for {rp_id}"),
             &self.session,
             &self.store_dir,
-        ) {
-            self.recent_assertion_approval = None;
-            return false;
-        }
-
-        self.recent_assertion_approval = Some(RecentAssertionApproval {
-            rp_id: rp_id.to_owned(),
-            expires_at: now + ASSERTION_APPROVAL_GRACE,
-        });
-        true
+        )
     }
 }
 
@@ -617,10 +583,7 @@ trait MapKey {
 
 impl MapKey for i128 {
     fn matches(&self, value: &Value) -> bool {
-        value
-            .as_integer()
-            .and_then(|integer| i128::try_from(integer).ok())
-            == Some(*self)
+        value.as_integer().map(i128::from) == Some(*self)
     }
 }
 
@@ -981,6 +944,7 @@ fn error_response(status: ErrorStatus) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn get_info_starts_with_success() {
@@ -1409,6 +1373,7 @@ mod tests {
             .collect();
         store::save_ctap2_credentials_to_dir(&store_dir, &stored_credentials)
             .expect("save test credentials");
+        start_auto_approval_ipc(&store_dir);
 
         Authenticator {
             store_dir,
@@ -1439,12 +1404,16 @@ mod tests {
                     sign_count: credential.sign_count,
                 })
                 .collect(),
-            recent_assertion_approval: Some(RecentAssertionApproval {
-                rp_id: rp_id.to_owned(),
-                expires_at: Instant::now() + ASSERTION_APPROVAL_GRACE,
-            }),
             pending_assertion: None,
         }
+    }
+
+    fn start_auto_approval_ipc(store_dir: &Path) {
+        let settings =
+            std::sync::Arc::new(std::sync::Mutex::new(crate::gtk_ui::UiSettings::default()));
+        let server_uid = Some(1000);
+        let _ = crate::ipc::start_control_socket_server(store_dir, settings, server_uid, None)
+            .expect("start auto-approval IPC server");
     }
 
     struct StoredCredentialTest {

@@ -105,9 +105,7 @@ impl PacketHandler {
         sequence: u8,
         report: &[u8],
     ) -> Option<PacketOutcome> {
-        let Some(pending) = self.pending.as_mut() else {
-            return None;
-        };
+        let pending = self.pending.as_mut()?;
 
         if pending.cid != cid || pending.next_sequence != sequence {
             let error_cid = pending.cid;

@@ -17,9 +17,23 @@ use crate::{gtk_ui::UiSettings, session::SessionContext};
 pub const CONTROL_SOCKET_FILE: &str = "control.sock";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerProcessInfo {
+    pub pid: u32,
+    pub uid: u32,
+    pub gid: u32,
+}
+
+impl PeerProcessInfo {
+    pub fn describe(&self) -> String {
+        format!("pid={} uid={} gid={}", self.pid, self.uid, self.gid)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApprovalPrompt {
     pub session: SessionContext,
     pub prompt: String,
+    pub peer: Option<PeerProcessInfo>,
 }
 
 #[derive(Debug, Default)]
@@ -165,10 +179,11 @@ fn handle_connection(
     server_uid: Option<u32>,
     approval_state: Option<&Arc<ApprovalPromptState>>,
 ) -> Result<()> {
-    let peer_uid = peer_uid(&stream);
-    if !peer_is_authorized(server_uid, peer_uid) {
+    let peer = peer_credentials(&stream);
+    if !peer_is_authorized(server_uid, peer.as_ref().map(|peer| peer.uid)) {
         return Err(color_eyre::eyre::eyre!(
-            "rejecting IPC peer uid={peer_uid:?} for server uid={server_uid:?}"
+            "rejecting IPC peer uid={:?} for server uid={server_uid:?}",
+            peer.as_ref().map(|peer| peer.uid)
         ));
     }
 
@@ -189,9 +204,22 @@ fn handle_connection(
             IpcResponse::Ack
         }
         IpcRequest::PromptApproval(prompt) => {
+            let prompt = if let Some(peer) = peer.clone() {
+                ApprovalPrompt {
+                    peer: Some(peer),
+                    ..prompt
+                }
+            } else {
+                prompt
+            };
             log::info!(
-                "IPC approval prompt for session {}: {}",
+                "IPC approval prompt for session {} from {}: {}",
                 prompt.session.describe(),
+                prompt
+                    .peer
+                    .as_ref()
+                    .map(PeerProcessInfo::describe)
+                    .unwrap_or_else(|| "peer=unknown".to_owned()),
                 prompt.prompt
             );
             if let Some(state) = approval_state {
@@ -215,7 +243,7 @@ fn peer_is_authorized(server_uid: Option<u32>, peer_uid: Option<u32>) -> bool {
     matches!(peer_uid, Some(0)) || peer_uid == server_uid
 }
 
-fn peer_uid(stream: &UnixStream) -> Option<u32> {
+fn peer_credentials(stream: &UnixStream) -> Option<PeerProcessInfo> {
     #[cfg(target_os = "linux")]
     {
         unsafe {
@@ -229,7 +257,11 @@ fn peer_uid(stream: &UnixStream) -> Option<u32> {
                 &mut len,
             );
             if result == 0 {
-                return Some(cred.uid);
+                return Some(PeerProcessInfo {
+                    pid: u32::try_from(cred.pid).ok()?,
+                    uid: cred.uid,
+                    gid: cred.gid,
+                });
             }
         }
     }
@@ -304,6 +336,7 @@ mod tests {
                 dbus_session_bus_address: None,
             },
             prompt: "Approve passkey request".to_owned(),
+            peer: None,
         };
         let response = super::send_request(&socket_path, &IpcRequest::PromptApproval(prompt))
             .expect("prompt approval");
@@ -315,5 +348,16 @@ mod tests {
         assert!(super::peer_is_authorized(Some(1000), Some(1000)));
         assert!(super::peer_is_authorized(Some(1000), Some(0)));
         assert!(!super::peer_is_authorized(Some(1000), Some(1001)));
+    }
+
+    #[test]
+    fn peer_process_info_describe_includes_pid_uid_and_gid() {
+        let peer = super::PeerProcessInfo {
+            pid: 123,
+            uid: 1000,
+            gid: 1000,
+        };
+
+        assert_eq!(peer.describe(), "pid=123 uid=1000 gid=1000");
     }
 }
