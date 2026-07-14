@@ -188,7 +188,6 @@ impl Authenticator {
                 user_display_name.or(user_name).unwrap_or("unknown user")
             ),
             &self.session,
-            &self.store_dir,
         ) {
             return Err(ErrorStatus::OperationDenied);
         }
@@ -547,7 +546,6 @@ impl Authenticator {
         if !approval::approve(
             &format!("Authenticate with passkey for {rp_id}"),
             &self.session,
-            &self.store_dir,
         ) {
             return false;
         }
@@ -995,7 +993,14 @@ fn error_response(status: ErrorStatus) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
+
+    fn ensure_auto_approve() {
+        static INIT: std::sync::Once = std::sync::Once::new();
+        INIT.call_once(|| {
+            // SAFETY: tests are single-threaded per Rust test runner contract
+            unsafe { std::env::set_var("LINUX_TPM_FIDO2_AUTO_APPROVE", "1") };
+        });
+    }
 
     #[test]
     fn get_info_starts_with_success() {
@@ -1401,6 +1406,7 @@ mod tests {
         rp_id: &str,
         credentials: Vec<StoredCredentialTest>,
     ) -> Authenticator {
+        ensure_auto_approve();
         let store_dir = test_store_dir("authenticator");
         let stored_credentials: Vec<_> = credentials
             .iter()
@@ -1426,8 +1432,6 @@ mod tests {
             .collect();
         store::save_ctap2_credentials_to_dir(&store_dir, &stored_credentials)
             .expect("save test credentials");
-        start_auto_approval_ipc(&store_dir);
-
         Authenticator {
             store_dir,
             tpm_path: None,
@@ -1450,13 +1454,6 @@ mod tests {
                 .collect(),
             pending_assertion: None,
         }
-    }
-
-    fn start_auto_approval_ipc(store_dir: &Path) {
-        let settings =
-            std::sync::Arc::new(std::sync::Mutex::new(crate::ipc::UiSettings::default()));
-        let _ = crate::ipc::start_control_socket_server(store_dir, settings, None, None)
-            .expect("start auto-approval IPC server");
     }
 
     struct StoredCredentialTest {

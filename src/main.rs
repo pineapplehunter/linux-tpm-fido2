@@ -2,7 +2,7 @@ use std::{env, path::PathBuf, thread, time::Duration};
 
 use clap::Parser;
 use color_eyre::{Result, eyre::WrapErr};
-use linux_tpm_fido2::{ctaphid, hid, ipc, session, store, tpm};
+use linux_tpm_fido2::{ctaphid, hid, session, store, tpm};
 use uhid_virt::{OutputEvent, StreamError, UHIDDevice};
 
 fn main() -> Result<()> {
@@ -20,13 +20,10 @@ fn main() -> Result<()> {
         "credential database: {}",
         store::credentials_database_path_in_dir(&store_dir).display()
     );
-    log::info!(
-        "control socket: {}",
-        ipc::control_socket_path_in_dir(&store_dir).display()
-    );
     let session = session::SessionContext::detect();
     log::info!("session model: {}", session.describe());
 
+    #[cfg(feature = "auto-approve")]
     if env::var("LINUX_TPM_FIDO2_AUTO_APPROVE").is_ok() {
         log::warn!("═══════════════════════════════════════════════════════");
         log::warn!("  LINUX_TPM_FIDO2_AUTO_APPROVE is SET — all approval");

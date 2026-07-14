@@ -7,7 +7,12 @@
       ...
     }:
     let
-      linux-tpm-fido2 = config.packages.default;
+      linux-tpm-fido2 = config.packages.default.overrideAttrs (old: {
+        cargoBuildFlags = (old.cargoBuildFlags or [ ]) ++ [
+          "--features"
+          "auto-approve"
+        ];
+      });
       linux-tpm-fido2-smoke = pkgs.writeShellApplication {
         name = "linux-tpm-fido2-smoke";
         runtimeInputs = with pkgs; [
@@ -30,6 +35,7 @@
             imports = [ ./module.nix ];
 
             virtualisation.memorySize = 1536;
+            virtualisation.tpm.enable = true;
 
             services.linux-tpm-fido2 = {
               enable = true;
@@ -42,8 +48,6 @@
             systemd.services.linux-tpm-fido2.serviceConfig.Environment = "LINUX_TPM_FIDO2_AUTO_APPROVE=1";
 
             environment.systemPackages = [
-              pkgs.kmod
-              pkgs.swtpm
               linux-tpm-fido2-smoke
             ];
           };
@@ -51,10 +55,7 @@
         testScript = ''
           start_all()
 
-          machine.succeed("mkdir -p /tmp/linux-tpm-fido2-smoke/swtpm /tmp/linux-tpm-fido2-smoke/store")
-          machine.succeed("modprobe cuse")
-          machine.succeed("nohup swtpm cuse --name=tpm0 --tpm2 --tpmstate dir=/tmp/linux-tpm-fido2-smoke/swtpm --flags startup-clear >/tmp/linux-tpm-fido2-smoke/swtpm.log 2>&1 &")
-          machine.wait_until_succeeds("test -e /dev/tpm0")
+          machine.succeed("mkdir -p /tmp/linux-tpm-fido2-smoke/store")
 
           machine.wait_until_succeeds("systemctl is-active linux-tpm-fido2")
           machine.wait_until_succeeds("sh -c 'set -- /dev/hidraw*; [ $# -ge 2 ]'")

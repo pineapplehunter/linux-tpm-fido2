@@ -10,12 +10,11 @@ Move the task to the end of "Completed" when finished with a timestamp like "(fi
 
 ### In Progress
 
-- [x] Fix polkit action ID mismatch: code uses `org.linux_tpm_fido2.approve`, policy now matches.
+*(none)*
 
 ### Next Tasks
 
-- [ ] Evaluate whether the Unix-socket IPC control surface (ipc.rs) has ongoing value or should be removed alongside the GTK frontend.
-- [ ] Refactor NixOS test to use `virtualisation.tpm.enable` instead of manual swtpm CUSE setup — eliminates `modprobe cuse` dependency and simplifies the test script.
+*(none)*
 
 ### Completed
 
@@ -72,6 +71,9 @@ Move the task to the end of "Completed" when finished with a timestamp like "(fi
 - [x] Add NixOS module and update test to use it; reboot test verifies credential persistence (2026-07-14 22:30).
 - [x] Investigated virtualisation.tpm.enable — swtpm CUSE approach is correct for QEMU-less VM TPM provisioning.
 - [x] Bind UHID device to active sessions via uaccess in tpm-fido2.rules.
+- [x] Remove dead Unix-socket IPC control surface (ipc.rs) — unused since GTK frontend removal (2026-07-14).
+- [x] Refactor NixOS test to use `virtualisation.tpm.enable` instead of manual swtpm CUSE (2026-07-14).
+- [x] Put auto-approve behind a compilation feature flag `auto-approve` (2026-07-14).
 
 ## General things to keep in mind.
 - Commit the changes to git after a task
