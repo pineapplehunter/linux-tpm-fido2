@@ -7,12 +7,6 @@
       ...
     }:
     let
-      linux-tpm-fido2 = config.packages.default.overrideAttrs (old: {
-        cargoBuildFlags = (old.cargoBuildFlags or [ ]) ++ [
-          "--features"
-          "auto-approve"
-        ];
-      });
       linux-tpm-fido2-smoke = pkgs.writeShellApplication {
         name = "linux-tpm-fido2-smoke";
         runtimeInputs = with pkgs; [
@@ -26,8 +20,8 @@
       };
     in
     {
-      checks.nixos = pkgs.testers.runNixOSTest {
-        name = "linux-tpm-fido2";
+      checks.nixos-polkit = pkgs.testers.runNixOSTest {
+        name = "linux-tpm-fido2-polkit";
 
         nodes.machine = {
           imports = [ ./module.nix ];
@@ -37,12 +31,20 @@
 
           services.linux-tpm-fido2 = {
             enable = true;
-            package = linux-tpm-fido2;
+            package = config.packages.default;
             tpmPath = "/dev/tpm0";
             uhidPath = "/dev/uhid";
           };
 
-          systemd.services.linux-tpm-fido2.serviceConfig.Environment = "LINUX_TPM_FIDO2_AUTO_APPROVE=1";
+          systemd.services.linux-tpm-fido2.serviceConfig.Environment = "XDG_SESSION_ID=1";
+
+          security.polkit.extraConfig = ''
+            polkit.addRule(function(action, subject) {
+              if (action.id == "io.github.pineapplehunter.linux-tpm-fido2.approve") {
+                return polkit.Result.YES;
+              }
+            });
+          '';
 
           environment.systemPackages = [
             linux-tpm-fido2-smoke
@@ -52,15 +54,15 @@
         testScript = ''
           machine.wait_for_unit("linux-tpm-fido2")
 
-          # test if a normal register and login procedure works
+          # register and assert should succeed via polkit authorization
           machine.succeed("WORKDIR=/tmp/linux-tpm-fido2-smoke RP_ID=login.example.test linux-tpm-fido2-smoke register")
           machine.succeed("WORKDIR=/tmp/linux-tpm-fido2-smoke RP_ID=login.example.test linux-tpm-fido2-smoke assert")
 
-          # regression test for tpm storage exhaustion
+          # regression test for tpm session exhaustion
           for _ in range(20):
             machine.succeed("WORKDIR=/tmp/linux-tpm-fido2-smoke RP_ID=login.example.test linux-tpm-fido2-smoke assert")
 
-          # regression check for reboot persistance
+          # regression check for reboot persistence
           machine.shutdown()
           machine.wait_for_unit("linux-tpm-fido2")
           machine.succeed("WORKDIR=/tmp/linux-tpm-fido2-smoke RP_ID=login.example.test linux-tpm-fido2-smoke assert")

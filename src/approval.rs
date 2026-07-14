@@ -9,20 +9,19 @@ pub fn approve(prompt: &str, session: &session::SessionContext) -> bool {
         return true;
     }
 
-    // Prefer polkit when a session ID is available
-    if let Some(session_id) = &session.session_id {
-        match crate::polkit::check_session(session_id) {
-            Ok(true) => {
-                log::info!("polkit authorized approval: {prompt}");
-                return true;
-            }
-            Ok(false) => {
-                log::warn!("polkit denied approval: {prompt}");
-                return false;
-            }
-            Err(error) => {
-                log::warn!("polkit unavailable, falling back: {error:?}");
-            }
+    // Prefer polkit when available
+    let pid = std::process::id();
+    match crate::polkit::check_process(pid) {
+        Ok(true) => {
+            log::info!("polkit authorized approval: {prompt}");
+            return true;
+        }
+        Ok(false) => {
+            log::warn!("polkit denied approval: {prompt}");
+            return false;
+        }
+        Err(error) => {
+            log::warn!("polkit unavailable, falling back: {error:?}");
         }
     }
 
