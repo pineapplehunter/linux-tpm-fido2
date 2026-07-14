@@ -10,7 +10,7 @@ use crate::{
 
 pub fn approve(prompt: &str, session: &session::SessionContext, store_dir: &Path) -> bool {
     if std::env::var("LINUX_TPM_FIDO2_AUTO_APPROVE").is_ok() {
-        log::info!("auto-approving: {prompt}");
+        log::warn!("auto-approving (LINUX_TPM_FIDO2_AUTO_APPROVE): {prompt}");
         return true;
     }
 

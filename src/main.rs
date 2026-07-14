@@ -1,7 +1,7 @@
 use std::{env, path::PathBuf, thread, time::Duration};
 
 use clap::Parser;
-use color_eyre::{Result, eyre::WrapErr};
+use color_eyre::{eyre::WrapErr, Result};
 use linux_tpm_fido2::{ctaphid, hid, ipc, session, store, tpm};
 use uhid_virt::{OutputEvent, StreamError, UHIDDevice};
 
@@ -26,6 +26,14 @@ fn main() -> Result<()> {
     );
     let session = session::SessionContext::detect();
     log::info!("session model: {}", session.describe());
+
+    if env::var("LINUX_TPM_FIDO2_AUTO_APPROVE").is_ok() {
+        log::warn!("═══════════════════════════════════════════════════════");
+        log::warn!("  LINUX_TPM_FIDO2_AUTO_APPROVE is SET — all approval");
+        log::warn!("  prompts will be silently accepted.  DO NOT use this");
+        log::warn!("  in production or with real credentials.");
+        log::warn!("═══════════════════════════════════════════════════════");
+    }
 
     if config.dry_run {
         log::info!("dry run: not opening UHID or TPM devices");

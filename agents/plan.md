@@ -17,21 +17,27 @@
 - When a task is finished and moved to Completed, write the current time after the task like "(finished YY-MM-DD HH:mm)"
 - When the current task is moderately large split them up into subtasks and prepenthem in the "Next Tasks" Section
 
-## Current task
+## How to use this file
+
+This section has the task list.
+Tasks that need to be worked on should be in "Next Tasks"
+
+### Current task
 
 **Move the task you areworking on here**
 
-## Next Tasks
+### Next Tasks
 
 - [x] Remove the gtk frontend code and library to prepare for switching to polkit based authentication.
-- [ ] Add a feature flag or a environment flag to automatically approve the requests, so it is easier to test the program
+- [x] Add a feature flag or a environment flag to automatically approve the requests, so it is easier to test the program
+- [ ] Make a very obvious warning when using the auto approve feature.
 - [ ] See if virtualisation.tpm.enable might help with the nixos test
 - [ ] Write a nixos module that enables the daemon systemd service, polkit and udev.
 - [ ] Add a nixos test to see if the program works after reboot
-- [ ] Start implementation according to the "Security model design" section in this document.
-- [ ] Start next task in plan.md
+- [ ] Implement polkit authorization in approval flow.
+- [ ] Bind UHID device to active sessions via uaccess.
 
-## Completed
+### Completed
 
 - [x] Rust crate with `hid`, `ctaphid`, `ctap2`, `tpm`, and `store` modules.
 - [x] Virtual FIDO HID device over UHID with usage page `0xF1D0`, usage `0x01`, and 64-byte reports.
@@ -79,10 +85,10 @@ The [security model](../docs/security.md#current-implementation-status) lists ni
 - [x] Remove approval-reuse grace period in CTAP2 assertions.
 - [x] Switch passphrase hashing from SHA-256 to an offline-resistant KDF (PBKDF2/argon2).
 - [x] Set a non-empty TPM auth value on PCR-bound credential keys to prevent empty-auth bypass.
-- [ ] Obtain session identity dynamically from `systemd-logind` instead of environment variables.
+- [x] Obtain session identity dynamically from `systemd-logind` instead of environment variables.
 - [ ] Bind UHID device generations to active sessions with `uaccess`.
-- [ ] Verify session identity before and after approval interaction.
-- [ ] Add integrity protection (HMAC/AEAD) for stored credential metadata.
+- [x] Verify session identity before and after approval interaction.
+- [x] Add integrity protection (HMAC/AEAD) for stored credential metadata.
 - [x] Document rollback behavior and mitigations.
 - [ ] Integrate polkit authorization calls into the daemon at runtime.
 
