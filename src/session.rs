@@ -94,6 +94,34 @@ impl SessionContext {
     }
 }
 
+impl SessionContext {
+    /// Verify that the current session still matches this context.
+    ///
+    /// Re-queries systemd-logind (or env vars as fallback) and
+    /// compares the uid and session_id.  Returns `true` when the
+    /// caller's session has not changed.
+    pub fn verify_matches_current(&self) -> bool {
+        let current = Self::detect();
+        if current.uid != self.uid {
+            log::warn!(
+                "session UID changed: expected {:?}, got {:?}",
+                self.uid,
+                current.uid
+            );
+            return false;
+        }
+        if current.session_id != self.session_id {
+            log::warn!(
+                "session ID changed: expected {:?}, got {:?}",
+                self.session_id,
+                current.session_id
+            );
+            return false;
+        }
+        true
+    }
+}
+
 impl Default for SessionContext {
     fn default() -> Self {
         Self::detect()

@@ -14,7 +14,7 @@
 - Use bullet points on tha plan.md to reduce git diff.
 - The user may add tasks in the list.
 - When switching to a new task put the task under "## In Progress" in the plan.md file.
-- When a task is finished and moved to Completed, write the time the task finished
+- When a task is finished and moved to Completed, write the current time after the task like "(finished YY-MM-DD HH:mm)"
 - When the current task is moderately large split them up into subtasks and prepenthem in the "Next Tasks" Section
 
 ## Current task
@@ -26,6 +26,7 @@
 - [x] Remove the gtk frontend code and library to prepare for switching to polkit based authentication.
 - [ ] Add a feature flag or a environment flag to automatically approve the requests, so it is easier to test the program
 - [ ] See if virtualisation.tpm.enable might help with the nixos test
+- [ ] Write a nixos module that enables the daemon systemd service, polkit and udev.
 - [ ] Add a nixos test to see if the program works after reboot
 - [ ] Start implementation according to the "Security model design" section in this document.
 - [ ] Start next task in plan.md

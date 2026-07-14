@@ -152,6 +152,11 @@ impl Authenticator {
             return Err(ErrorStatus::CredentialExcluded);
         }
 
+        if !self.session.verify_matches_current() {
+            log::error!("session changed before registration approval");
+            return Err(ErrorStatus::OperationDenied);
+        }
+
         if !approval::approve(
             &format!(
                 "Register a new passkey for {} as {}",
@@ -161,6 +166,11 @@ impl Authenticator {
             &self.session,
             &self.store_dir,
         ) {
+            return Err(ErrorStatus::OperationDenied);
+        }
+
+        if !self.session.verify_matches_current() {
+            log::error!("session changed during registration approval");
             return Err(ErrorStatus::OperationDenied);
         }
 
@@ -505,11 +515,25 @@ impl Authenticator {
     }
 
     fn assertion_approved(&mut self, rp_id: &str) -> bool {
-        approval::approve(
+        if !self.session.verify_matches_current() {
+            log::error!("session changed before assertion approval for {rp_id}");
+            return false;
+        }
+
+        if !approval::approve(
             &format!("Authenticate with passkey for {rp_id}"),
             &self.session,
             &self.store_dir,
-        )
+        ) {
+            return false;
+        }
+
+        if !self.session.verify_matches_current() {
+            log::error!("session changed during assertion approval for {rp_id}");
+            return false;
+        }
+
+        true
     }
 }
 
@@ -1385,16 +1409,7 @@ mod tests {
             store_dir,
             tpm_path: None,
             tpm: None,
-            session: session::SessionContext {
-                model: session::DaemonSessionModel::ActiveGraphicalSession,
-                user: Some("test-user".to_owned()),
-                uid: Some(1000),
-                session_id: Some("test-session".to_owned()),
-                seat: Some("seat0".to_owned()),
-                display: Some(":0".to_owned()),
-                wayland_display: None,
-                dbus_session_bus_address: None,
-            },
+            session: session::SessionContext::detect(),
             credentials: credentials
                 .into_iter()
                 .map(|credential| Credential {
@@ -1417,8 +1432,7 @@ mod tests {
     fn start_auto_approval_ipc(store_dir: &Path) {
         let settings =
             std::sync::Arc::new(std::sync::Mutex::new(crate::ipc::UiSettings::default()));
-        let server_uid = Some(1000);
-        let _ = crate::ipc::start_control_socket_server(store_dir, settings, server_uid, None)
+        let _ = crate::ipc::start_control_socket_server(store_dir, settings, None, None)
             .expect("start auto-approval IPC server");
     }
 

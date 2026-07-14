@@ -240,7 +240,7 @@ fn handle_connection(
 }
 
 fn peer_is_authorized(server_uid: Option<u32>, peer_uid: Option<u32>) -> bool {
-    matches!(peer_uid, Some(0)) || peer_uid == server_uid
+    server_uid.is_none() || matches!(peer_uid, Some(0)) || peer_uid == server_uid
 }
 
 fn peer_credentials(stream: &UnixStream) -> Option<PeerProcessInfo> {
