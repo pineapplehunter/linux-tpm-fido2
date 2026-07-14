@@ -14,15 +14,16 @@
 - Use bullet points on tha plan.md to reduce git diff.
 - The user may add tasks in the list.
 - When switching to a new task put the task under "## In Progress" in the plan.md file.
-- When a task is finished and moved to Completed, write the current time after the task like "(finished YY-MM-DD HH:mm)"
 - When the current task is moderately large split them up into subtasks and prepenthem in the "Next Tasks" Section
 
 ## How to use this file
 
 This section has the task list.
-Tasks that need to be worked on should be in "Next Tasks"
+Tasks that need to be worked on should be in "Next Tasks".
+Move the task to "Current Task" when starting woworkon it.
+Move the task to the end of "Completed" when finished with a timestamp like "(finished YY-MM-DD HH:mm)".
 
-### Current task
+### Current Task
 
 **Move the task you areworking on here**
 
@@ -30,6 +31,7 @@ Tasks that need to be worked on should be in "Next Tasks"
 
 - [x] Remove the gtk frontend code and library to prepare for switching to polkit based authentication.
 - [x] Add a feature flag or a environment flag to automatically approve the requests, so it is easier to test the program
+- [ ] When you have multiple contants for the same context (especially for ctap2) use a enum.
 - [ ] Make a very obvious warning when using the auto approve feature.
 - [ ] See if virtualisation.tpm.enable might help with the nixos test
 - [ ] Write a nixos module that enables the daemon systemd service, polkit and udev.

@@ -14,6 +14,23 @@ pub fn approve(prompt: &str, session: &session::SessionContext, store_dir: &Path
         return true;
     }
 
+    // Prefer polkit when a session ID is available
+    if let Some(session_id) = &session.session_id {
+        match crate::polkit::check_session(session_id) {
+            Ok(true) => {
+                log::info!("polkit authorized approval: {prompt}");
+                return true;
+            }
+            Ok(false) => {
+                log::warn!("polkit denied approval: {prompt}");
+                return false;
+            }
+            Err(error) => {
+                log::warn!("polkit unavailable, falling back: {error:?}");
+            }
+        }
+    }
+
     if let Some(approved) = approve_via_ipc(prompt, session, store_dir) {
         return approved;
     }

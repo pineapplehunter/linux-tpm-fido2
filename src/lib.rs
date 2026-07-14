@@ -3,6 +3,7 @@ pub mod ctap2;
 pub mod ctaphid;
 pub mod hid;
 pub mod ipc;
+pub mod polkit;
 pub mod session;
 pub mod store;
 pub mod systemd_logind;
