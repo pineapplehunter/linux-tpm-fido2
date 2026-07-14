@@ -1217,6 +1217,8 @@ dependencies = [
  "color-eyre",
  "env_logger",
  "getrandom 0.4.3",
+ "hex",
+ "hmac",
  "libc",
  "log",
  "p256",

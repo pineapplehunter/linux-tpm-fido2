@@ -9,13 +9,18 @@ use color_eyre::{
     Result,
     eyre::{WrapErr, eyre},
 };
+use hmac::{Hmac, KeyInit, Mac};
+use sha2::Sha256;
 use sqlx::{
     Row, SqlitePool,
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
 };
 
+type HmacSha256 = Hmac<Sha256>;
+
 pub const DEV_STORE_DIR: &str = ".linux-tpm-fido2-store";
 const CREDENTIALS_DATABASE_FILE: &str = "credentials.sqlite";
+const HMAC_KEY_FILE: &str = "integrity.hmac-key";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredCtap2Credential {
@@ -29,6 +34,7 @@ pub struct StoredCtap2Credential {
     pub policy: Option<StoredPcrPolicy>,
     pub recovery: Option<StoredRecoverySlot>,
     pub sign_count: u32,
+    pub integrity_mac: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,7 +118,7 @@ async fn load_ctap2_credentials_async(
     let pool = open_database(dir).await?;
     let rows = sqlx::query(
         "SELECT m.credential_id, m.rp_id, m.user_id, m.user_handle, m.user_name, m.user_display_name, \
-                m.sign_count, \
+                m.sign_count, m.integrity_mac, \
                 p.policy_selection, p.policy_digest, \
                 p.tpm_private AS primary_tpm_private, p.tpm_public AS primary_tpm_public, \
                 p.public_key_x AS primary_public_key_x, p.public_key_y AS primary_public_key_y, \
@@ -152,8 +158,9 @@ async fn load_ctap2_credentials_async(
             let primary_tpm_auth_value: Option<Vec<u8>> = row.try_get("primary_tpm_auth_value")?;
             let recovery_tpm_auth_value: Option<Vec<u8>> =
                 row.try_get("recovery_tpm_auth_value")?;
+            let integrity_mac: Option<Vec<u8>> = row.try_get("integrity_mac")?;
 
-            Ok(StoredCtap2Credential {
+            let stored = StoredCtap2Credential {
                 id: row.try_get("credential_id")?,
                 rp_id: row.try_get("rp_id")?,
                 user_id: match (stored_user_id, user_id) {
@@ -211,7 +218,32 @@ async fn load_ctap2_credentials_async(
                 },
                 sign_count: u32::try_from(sign_count)
                     .wrap_err_with(|| format!("invalid sign_count {}", sign_count))?,
-            })
+                integrity_mac,
+            };
+
+            if let Some(ref expected_mac) = stored.integrity_mac {
+                let key = match load_or_generate_hmac_key(dir) {
+                    Ok(key) => key,
+                    Err(error) => {
+                        log::warn!("cannot verify credential integrity: {error:?}");
+                        return Ok(stored);
+                    }
+                };
+                let computed = compute_credential_mac(&key, &stored)?;
+                if computed != expected_mac as &[u8] {
+                    log::error!(
+                        "credential integrity check failed for rp_id={} id={}",
+                        stored.rp_id,
+                        hex::encode(&stored.id)
+                    );
+                    return Err(eyre!(
+                        "credential integrity check failed for rp_id={}",
+                        stored.rp_id
+                    ));
+                }
+            }
+
+            Ok(stored)
         })
         .collect()
 }
@@ -229,10 +261,21 @@ async fn save_ctap2_credentials_async(
         .wrap_err("clearing credential rows")?;
 
     for credential in credentials {
+        let key = match load_or_generate_hmac_key(dir) {
+            Ok(key) => {
+                let mac = compute_credential_mac(&key, credential)?;
+                Some(mac)
+            }
+            Err(error) => {
+                log::warn!("cannot compute credential integrity MAC: {error:?}");
+                None
+            }
+        };
+
         sqlx::query(
             "INSERT INTO credential_metadata \
-             (credential_id, rp_id, user_id, user_handle, user_name, user_display_name, sign_count) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             (credential_id, rp_id, user_id, user_handle, user_name, user_display_name, sign_count, integrity_mac) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         )
         .bind(&credential.id)
         .bind(&credential.rp_id)
@@ -241,6 +284,7 @@ async fn save_ctap2_credentials_async(
         .bind(credential.user_name.as_deref())
         .bind(credential.user_display_name.as_deref())
         .bind(i64::from(credential.sign_count))
+        .bind(key.as_deref())
         .execute(&mut *tx)
         .await
         .wrap_err_with(|| format!("saving credential metadata for rp_id={}", credential.rp_id))?;
@@ -354,6 +398,52 @@ async fn open_database(dir: &Path) -> Result<SqlitePool> {
     Ok(pool)
 }
 
+fn load_or_generate_hmac_key(dir: &Path) -> Result<[u8; 32]> {
+    let path = dir.join(HMAC_KEY_FILE);
+    if path.exists() {
+        let raw = fs::read(&path)
+            .wrap_err_with(|| format!("reading HMAC key from {}", path.display()))?;
+        let key: [u8; 32] = raw.clone().try_into().map_err(|_| {
+            eyre!(
+                "HMAC key file {} has wrong length (expected 32, got {})",
+                path.display(),
+                raw.len()
+            )
+        })?;
+        Ok(key)
+    } else {
+        let mut key = [0u8; 32];
+        getrandom::fill(&mut key).wrap_err("generating HMAC key from system random")?;
+        fs::create_dir_all(dir).wrap_err_with(|| format!("creating {}", dir.display()))?;
+        fs::write(&path, &key)
+            .wrap_err_with(|| format!("writing HMAC key to {}", path.display()))?;
+        log::info!("generated new HMAC integrity key at {}", path.display());
+        Ok(key)
+    }
+}
+
+fn compute_credential_mac(key: &[u8; 32], credential: &StoredCtap2Credential) -> Result<Vec<u8>> {
+    let mut mac = HmacSha256::new_from_slice(key).wrap_err("creating HMAC-SHA256")?;
+
+    mac.update(&(credential.id.len() as u64).to_be_bytes());
+    mac.update(&credential.id);
+    mac.update(&(credential.rp_id.len() as u64).to_be_bytes());
+    mac.update(credential.rp_id.as_bytes());
+    mac.update(&(credential.user_handle.len() as u64).to_be_bytes());
+    mac.update(&credential.user_handle);
+    mac.update(&credential.user_id.unwrap_or(0).to_be_bytes());
+
+    let user_name = credential.user_name.as_deref().unwrap_or("");
+    mac.update(&(user_name.len() as u64).to_be_bytes());
+    mac.update(user_name.as_bytes());
+
+    let display_name = credential.user_display_name.as_deref().unwrap_or("");
+    mac.update(&(display_name.len() as u64).to_be_bytes());
+    mac.update(display_name.as_bytes());
+
+    Ok(mac.finalize().into_bytes().to_vec())
+}
+
 fn block_on_store<T>(future: impl Future<Output = Result<T>>) -> Result<T> {
     tokio::runtime::Builder::new_current_thread()
         .enable_time()
@@ -413,12 +503,21 @@ mod tests {
                 },
             }),
             sign_count: 10,
+            integrity_mac: None,
         }];
 
         save_ctap2_credentials_to_dir(&dir, &credentials).expect("save CTAP2 credentials");
         let loaded = load_ctap2_credentials_from_dir(&dir, None).expect("load CTAP2 credentials");
 
-        assert_eq!(loaded, credentials);
+        assert_eq!(loaded.len(), 1);
+        assert!(loaded[0].integrity_mac.is_some());
+        assert_eq!(loaded[0].integrity_mac.as_ref().map(Vec::len), Some(32));
+        // Compare metadata excluding integrity_mac (which is computed at save time)
+        let mut loaded_meta = loaded[0].clone();
+        loaded_meta.integrity_mac = None;
+        let mut saved_meta = credentials[0].clone();
+        saved_meta.integrity_mac = None;
+        assert_eq!(loaded_meta, saved_meta);
         assert!(credentials_database_path_in_dir(&dir).exists());
         fs::remove_dir_all(&dir).expect("remove test store");
     }
@@ -443,6 +542,7 @@ mod tests {
             policy: None,
             recovery: None,
             sign_count: 1,
+            integrity_mac: None,
         };
         let second = StoredCtap2Credential {
             id: vec![2],
@@ -461,6 +561,7 @@ mod tests {
             policy: None,
             recovery: None,
             sign_count: 2,
+            integrity_mac: None,
         };
 
         save_ctap2_credentials_to_dir(&dir, &[first, second.clone()])
@@ -470,7 +571,15 @@ mod tests {
 
         let loaded = load_ctap2_credentials_from_dir(&dir, None).expect("load credentials");
 
-        assert_eq!(loaded, vec![second]);
+        assert_eq!(loaded.len(), 1);
+        assert!(loaded[0].integrity_mac.is_some());
+        assert_eq!(loaded[0].integrity_mac.as_ref().map(Vec::len), Some(32));
+        // Compare metadata excluding integrity_mac
+        let mut loaded_meta = loaded[0].clone();
+        loaded_meta.integrity_mac = None;
+        let mut expected = second;
+        expected.integrity_mac = None;
+        assert_eq!(loaded_meta, expected);
         fs::remove_dir_all(&dir).expect("remove test store");
     }
 
@@ -530,6 +639,7 @@ mod tests {
             policy: None,
             recovery: None,
             sign_count,
+            integrity_mac: None,
         }
     }
 

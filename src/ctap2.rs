@@ -457,6 +457,7 @@ impl Authenticator {
                 policy: credential.policy.clone(),
                 recovery: credential.recovery.clone(),
                 sign_count: credential.sign_count,
+                integrity_mac: None,
             })
             .collect();
 
@@ -1373,6 +1374,7 @@ mod tests {
                 policy: None,
                 recovery: None,
                 sign_count: credential.sign_count,
+                integrity_mac: None,
             })
             .collect();
         store::save_ctap2_credentials_to_dir(&store_dir, &stored_credentials)
