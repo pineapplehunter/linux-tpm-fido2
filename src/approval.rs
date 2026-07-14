@@ -65,6 +65,5 @@ mod tests {
         // SAFETY: tests are single-threaded
         unsafe { std::env::set_var("LINUX_TPM_FIDO2_AUTO_APPROVE", "1") };
         assert!(approve("Approve passkey request", &session));
-        unsafe { std::env::remove_var("LINUX_TPM_FIDO2_AUTO_APPROVE") };
     }
 }
