@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use color_eyre::Result;
 use zbus::blocking::Connection;
-use zbus::zvariant::{OwnedValue, Value};
+use zbus::zvariant::Value;
 
 const POLKIT_AUTHORITY: &str = "org.freedesktop.PolicyKit1";
 const POLKIT_AUTHORITY_PATH: &str = "/org/freedesktop/PolicyKit1/Authority";
@@ -36,7 +36,7 @@ pub fn check_process(pid: u32) -> Result<bool> {
     let flags = 0u32;
     let cancellation_id = String::new();
 
-    let result: (bool, HashMap<String, OwnedValue>, bool) = conn
+    let result: (bool, bool, HashMap<String, String>) = conn
         .call_method(
             Some(POLKIT_AUTHORITY),
             POLKIT_AUTHORITY_PATH,
