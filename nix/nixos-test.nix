@@ -1,4 +1,3 @@
-{ self, ... }:
 {
   perSystem =
     {
@@ -8,6 +7,12 @@
       ...
     }:
     let
+      linux-tpm-fido2 = config.packages.default.overrideAttrs (old: {
+        cargoBuildFlags = (old.cargoBuildFlags or [ ]) ++ [
+          "--features"
+          "auto-approve"
+        ];
+      });
       linux-tpm-fido2-smoke = pkgs.writeShellApplication {
         name = "linux-tpm-fido2-smoke";
         runtimeInputs = with pkgs; [
@@ -25,19 +30,14 @@
         name = "linux-tpm-fido2";
 
         nodes.machine = {
-          imports = [ self.nixosModules.default ];
+          imports = [ ./module.nix ];
 
           virtualisation.memorySize = 1536;
           virtualisation.tpm.enable = true;
 
           services.linux-tpm-fido2 = {
             enable = true;
-            package = config.packages.default.overrideAttrs (old: {
-              cargoBuildFlags = (old.cargoBuildFlags or [ ]) ++ [
-                "--features"
-                "auto-approve"
-              ];
-            });
+            package = linux-tpm-fido2;
             tpmPath = "/dev/tpm0";
             uhidPath = "/dev/uhid";
           };
