@@ -14,26 +14,27 @@ const POLKIT_ACTION_ID: &str = "io.github.pineapplehunter.linux-tpm-fido2.approv
 /// Uses a `unix-process` subject with the given PID and its
 /// start time (in clock ticks since boot, as read from /proc).
 ///
+/// `user_uid` is the uid of the user who initiated the operation
+/// (from the session context), not the daemon's own uid.
+///
 /// Returns `Ok(true)` when authorized, `Ok(false)` when denied,
 /// and `Err` when polkit is unavailable or communication fails.
-pub fn check_process(pid: u32) -> Result<bool> {
+pub fn check_process(pid: u32, user_uid: u32) -> Result<bool> {
     let start_time = process_start_time_ticks(pid)?;
 
-    log::info!(
-        "polkit subject: pid={pid}, start-time={start_time}, uid={}",
-        unsafe { libc::getuid() }
-    );
+    log::info!("polkit subject: pid={pid}, start-time={start_time}, uid={user_uid}",);
 
     let conn = Connection::system()?;
 
     let mut subject_details: HashMap<&str, Value> = HashMap::new();
     subject_details.insert("pid", Value::from(pid));
     subject_details.insert("start-time", Value::from(start_time));
-    subject_details.insert("uid", Value::from(unsafe { libc::getuid() as i32 }));
+    subject_details.insert("uid", Value::from(user_uid as i32));
     let subject = ("unix-process", subject_details);
 
     let empty_details: HashMap<&str, &str> = HashMap::new();
-    let flags = 0u32;
+    // AllowUserInteraction = 0x1 — lets polkit show an auth dialog
+    let flags = 1u32;
     let cancellation_id = String::new();
 
     let result: (bool, bool, HashMap<String, String>) = conn

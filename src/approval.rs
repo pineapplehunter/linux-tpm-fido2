@@ -11,7 +11,8 @@ pub fn approve(prompt: &str, session: &session::SessionContext) -> bool {
 
     // Prefer polkit when available
     let pid = std::process::id();
-    match crate::polkit::check_process(pid) {
+    let user_uid = session.uid.unwrap_or(unsafe { libc::getuid() });
+    match crate::polkit::check_process(pid, user_uid) {
         Ok(true) => {
             log::info!("polkit authorized approval: {prompt}");
             return true;
