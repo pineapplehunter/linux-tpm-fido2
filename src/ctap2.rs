@@ -13,19 +13,34 @@ pub enum Ctap2Command {
     GetNextAssertion = 0x08,
 }
 
-impl Ctap2Command {
-    pub fn from_byte(b: u8) -> Option<Self> {
-        match b {
-            0x01 => Some(Self::MakeCredential),
-            0x02 => Some(Self::GetAssertion),
-            0x04 => Some(Self::GetInfo),
-            0x08 => Some(Self::GetNextAssertion),
-            _ => None,
+#[derive(Debug)]
+pub struct UnknownCtapCommandError;
+
+impl std::fmt::Display for UnknownCtapCommandError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+impl std::error::Error for UnknownCtapCommandError {}
+
+impl TryFrom<u8> for Ctap2Command {
+    type Error = UnknownCtapCommandError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0x01 => Ok(Self::MakeCredential),
+            0x02 => Ok(Self::GetAssertion),
+            0x04 => Ok(Self::GetInfo),
+            0x08 => Ok(Self::GetNextAssertion),
+            _ => Err(UnknownCtapCommandError),
         }
     }
+}
 
-    pub fn byte(self) -> u8 {
-        self as u8
+impl From<Ctap2Command> for u8 {
+    fn from(value: Ctap2Command) -> Self {
+        value as u8
     }
 }
 
@@ -130,7 +145,7 @@ impl Authenticator {
             return error_response(ErrorStatus::InvalidCommand);
         };
 
-        let Some(command) = Ctap2Command::from_byte(command) else {
+        let Ok(command) = Ctap2Command::try_from(command) else {
             log::info!("ctap2 command: unknown");
             return error_response(ErrorStatus::InvalidCommand);
         };
@@ -1004,14 +1019,14 @@ mod tests {
 
     #[test]
     fn get_info_starts_with_success() {
-        let response = Authenticator::default().handle_cbor(&[Ctap2Command::GetInfo.byte()]);
+        let response = Authenticator::default().handle_cbor(&[Ctap2Command::GetInfo.into()]);
         assert_eq!(response[0], 0x00);
         assert!(response.len() > 1);
     }
 
     #[test]
     fn get_info_uses_project_aaguid_and_algorithm_metadata() {
-        let response = Authenticator::default().handle_cbor(&[Ctap2Command::GetInfo.byte()]);
+        let response = Authenticator::default().handle_cbor(&[Ctap2Command::GetInfo.into()]);
         let Value::Map(map) = ciborium::from_reader::<Value, _>(&response[1..]).expect("CBOR")
         else {
             panic!("expected getInfo map");
@@ -1243,7 +1258,7 @@ mod tests {
         };
         assert_eq!(map_value(&map, 5), Some(&Value::Integer(2.into())));
 
-        let next = authenticator.handle_cbor(&[Ctap2Command::GetNextAssertion.byte()]);
+        let next = authenticator.handle_cbor(&[Ctap2Command::GetNextAssertion.into()]);
         assert_eq!(next[0], 0x00);
         let Value::Map(next_map) = ciborium::from_reader::<Value, _>(&next[1..]).expect("CBOR")
         else {
@@ -1484,7 +1499,7 @@ mod tests {
     }
 
     fn ctap_request(command: Ctap2Command, body: Value) -> Vec<u8> {
-        let mut payload = vec![command.byte()];
+        let mut payload = vec![command.into()];
         ciborium::into_writer(&body, &mut payload).expect("serialize CTAP request");
         payload
     }

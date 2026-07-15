@@ -26,6 +26,7 @@ pub struct SessionContext {
     pub user: Option<String>,
     pub uid: Option<u32>,
     pub session_id: Option<String>,
+    pub leader_pid: Option<u32>,
     pub seat: Option<String>,
     pub display: Option<String>,
     pub wayland_display: Option<String>,
@@ -56,6 +57,7 @@ impl SessionContext {
             session_id: env::var("XDG_SESSION_ID")
                 .ok()
                 .filter(|value| !value.is_empty()),
+            leader_pid: None,
             seat: env::var("XDG_SEAT").ok().filter(|value| !value.is_empty()),
             display: env::var("DISPLAY").ok().filter(|value| !value.is_empty()),
             wayland_display: env::var("WAYLAND_DISPLAY")
@@ -139,6 +141,7 @@ mod tests {
             user: Some("alice".to_owned()),
             uid: Some(1000),
             session_id: Some("c2".to_owned()),
+            leader_pid: Some(1234),
             seat: Some("seat0".to_owned()),
             display: Some(":0".to_owned()),
             wayland_display: Some("wayland-0".to_owned()),

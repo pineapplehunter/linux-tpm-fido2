@@ -1,116 +1,80 @@
-use zbus::blocking::Connection;
+use zbus::{
+    blocking::Connection,
+    zvariant::{OwnedObjectPath, OwnedValue},
+};
 
 use crate::session::SessionContext;
 
-/// Try to detect the current session by querying systemd-logind.
+/// Try to detect the active graphical session by querying systemd-logind.
 ///
-/// Returns `Some(SessionContext)` on success, `None` if logind is
-/// unavailable (no D-Bus, no session, etc.).
+/// A system daemon is not itself attached to the user's session, so looking
+/// up the daemon PID would identify no session or the root session. Instead,
+/// select the active graphical session from logind's session list.
 pub fn detect_session() -> Option<SessionContext> {
     let connection = Connection::system().ok()?;
-    let pid = std::process::id();
-
-    let session_path: String = connection
+    let sessions: Vec<(String, u32, String, String, OwnedObjectPath)> = connection
         .call_method(
             Some("org.freedesktop.login1"),
             "/org/freedesktop/login1",
             Some("org.freedesktop.login1.Manager"),
-            "GetSessionByPID",
-            &(pid,),
+            "ListSessions",
+            &(),
         )
         .ok()?
         .body()
         .deserialize()
         .ok()?;
 
-    if session_path.is_empty() {
-        return None;
-    }
-
-    let props = |name: &str| -> Option<String> {
-        let raw: String = connection
-            .call_method(
-                Some("org.freedesktop.login1"),
-                session_path.as_str(),
-                Some("org.freedesktop.DBus.Properties"),
-                "Get",
-                &("org.freedesktop.login1.Session", name),
-            )
-            .ok()?
-            .body()
-            .deserialize()
-            .ok()?;
-        // The raw value is the D-Bus variant's string representation,
-        // e.g. for a string property it looks like "some-string",
-        // for a struct like "(uint32 1000, ...)".
-        if raw.is_empty() || raw == "/" {
-            return None;
+    let mut active_non_graphical = None;
+    for (session_id, uid, user, seat, path) in sessions {
+        let path = path.as_str();
+        if seat.is_empty()
+            || !bool::try_from(session_property(&connection, path, "Active")?).ok()?
+        {
+            continue;
         }
-        Some(raw)
-    };
 
-    let session_id = props("Id")?;
+        let session_type = String::try_from(session_property(&connection, path, "Type")?).ok()?;
+        let leader_pid = u32::try_from(session_property(&connection, path, "Leader")?).ok()?;
+        let display = String::try_from(session_property(&connection, path, "Display")?)
+            .ok()
+            .filter(|value| !value.is_empty());
+        let context = SessionContext {
+            model: crate::session::DaemonSessionModel::ActiveGraphicalSession,
+            user: (!user.is_empty()).then_some(user),
+            uid: Some(uid),
+            session_id: Some(session_id),
+            leader_pid: Some(leader_pid),
+            seat: Some(seat),
+            display,
+            wayland_display: None,
+            dbus_session_bus_address: None,
+        };
 
-    let user_str = props("User").unwrap_or_default();
-    let seat_str = props("Seat").unwrap_or_default();
-    let display = props("Display").unwrap_or_default();
+        if session_type == "x11" || session_type == "wayland" {
+            return Some(context);
+        }
+        active_non_graphical.get_or_insert(context);
+    }
 
-    let (uid, user_name) = parse_user_value(&user_str).unwrap_or((None, None));
-    let seat_id = parse_seat_value(&seat_str);
-    let display_str = if display.is_empty() {
-        None
-    } else {
-        Some(display)
-    };
-
-    Some(SessionContext {
-        model: crate::session::DaemonSessionModel::ActiveGraphicalSession,
-        user: user_name,
-        uid,
-        session_id: Some(session_id),
-        seat: seat_id,
-        display: display_str,
-        wayland_display: None,
-        dbus_session_bus_address: None,
-    })
+    active_non_graphical
 }
 
-/// Parse the "User" property of a logind session.
-///
-/// The User property is of type `(uo)` - a struct with a uint32 UID
-/// and an object path for the user object.  The simple string
-/// representation from OwnedValue::try_to_string() looks like
-/// `(uint32 1000, '/org/freedesktop/login1/user/_1000')`.
-fn parse_user_value(value: &str) -> Option<(Option<u32>, Option<String>)> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() || trimmed == "/" {
-        return None;
-    }
-    let without_parens = trimmed.strip_prefix('(')?;
-    let inner = without_parens.strip_suffix(')')?;
-    let parts: Vec<&str> = inner.splitn(2, ',').collect();
-    if parts.len() != 2 {
-        return None;
-    }
-    let uid_str = parts[0].trim().strip_prefix("uint32 ")?;
-    let uid: u32 = uid_str.parse().ok()?;
-    Some((Some(uid), None))
-}
-
-/// Parse the "Seat" property of a logind session.
-///
-/// The Seat property is of type `(so)` - a struct with a string seat
-/// ID and an object path.
-fn parse_seat_value(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() || trimmed == "/" {
-        return None;
-    }
-    let without_parens = trimmed.strip_prefix('(')?;
-    let inner = without_parens.strip_suffix(')')?;
-    let seat = inner.trim().trim_matches('\'').to_owned();
-    if seat.is_empty() {
-        return None;
-    }
-    Some(seat)
+fn session_property(
+    connection: &Connection,
+    session_path: &str,
+    property: &str,
+) -> Option<OwnedValue> {
+    connection
+        .call_method(
+            Some("org.freedesktop.login1"),
+            session_path,
+            Some("org.freedesktop.DBus.Properties"),
+            "Get",
+            &("org.freedesktop.login1.Session", property),
+        )
+        .ok()?
+        .body()
+        .deserialize()
+        .ok()
 }

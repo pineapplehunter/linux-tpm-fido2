@@ -9,21 +9,26 @@ pub fn approve(prompt: &str, session: &session::SessionContext) -> bool {
         return true;
     }
 
-    // Prefer polkit when available
-    let pid = std::process::id();
-    let user_uid = session.uid.unwrap_or(unsafe { libc::getuid() });
-    match crate::polkit::check_process(pid, user_uid) {
-        Ok(true) => {
-            log::info!("polkit authorized approval: {prompt}");
-            return true;
+    // A system daemon has no useful process subject: its process is root.
+    // Use the logged-in session leader so polkit can contact that user's agent.
+    if let (Some(session_id), Some(leader_pid), Some(user_uid)) =
+        (&session.session_id, session.leader_pid, session.uid)
+    {
+        match crate::polkit::check_session(session_id, leader_pid, user_uid) {
+            Ok(true) => {
+                log::info!("polkit authorized approval: {prompt}");
+                return true;
+            }
+            Ok(false) => {
+                log::warn!("polkit denied approval: {prompt}");
+                return false;
+            }
+            Err(error) => {
+                log::warn!("polkit unavailable, falling back: {error:?}");
+            }
         }
-        Ok(false) => {
-            log::warn!("polkit denied approval: {prompt}");
-            return false;
-        }
-        Err(error) => {
-            log::warn!("polkit unavailable, falling back: {error:?}");
-        }
+    } else {
+        log::warn!("no login session available for polkit approval");
     }
 
     let mut stdout = io::stdout();
@@ -58,6 +63,7 @@ mod tests {
             user: Some("alice".to_owned()),
             uid: Some(1000),
             session_id: None,
+            leader_pid: None,
             seat: Some("seat0".to_owned()),
             display: Some(":0".to_owned()),
             wayland_display: None,

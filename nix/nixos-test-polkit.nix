@@ -30,6 +30,11 @@
           virtualisation.memorySize = 1536;
           virtualisation.tpm.enable = true;
 
+          users.users.alice = {
+            isNormalUser = true;
+            password = "alice";
+          };
+
           services.linux-tpm-fido2 = {
             enable = true;
             package = config.packages.default;
@@ -37,11 +42,14 @@
             uhidPath = "/dev/uhid";
           };
 
-          systemd.services.linux-tpm-fido2.serviceConfig.Environment = "XDG_SESSION_ID=1";
+          # Start the daemon after the test creates Alice's real logind
+          # session, rather than supplying a non-existent session ID.
+          systemd.services.linux-tpm-fido2.wantedBy = lib.mkForce [ ];
 
           security.polkit.extraConfig = ''
             polkit.addRule(function(action, subject) {
-              if (action.id == "io.github.pineapplehunter.linux-tpm-fido2.approve") {
+              if (action.id == "io.github.pineapplehunter.linux-tpm-fido2.approve"
+                  && subject.user == "alice") {
                 return polkit.Result.YES;
               }
             });
@@ -53,6 +61,17 @@
         };
 
         testScript = ''
+          def login_alice():
+              machine.send_key("ctrl-alt-f1")
+              machine.wait_until_tty_matches("1", "login:")
+              machine.send_chars("alice\n")
+              machine.wait_until_tty_matches("1", "Password:")
+              machine.send_chars("alice\n")
+              machine.wait_until_tty_matches("1", "alice@")
+
+          machine.wait_for_unit("getty@tty1.service")
+          login_alice()
+          machine.succeed("systemctl start linux-tpm-fido2")
           machine.wait_for_unit("linux-tpm-fido2")
 
           # register and assert should succeed via polkit authorization
@@ -65,6 +84,9 @@
 
           # regression check for reboot persistence
           machine.shutdown()
+          machine.wait_for_unit("getty@tty1.service")
+          login_alice()
+          machine.succeed("systemctl start linux-tpm-fido2")
           machine.wait_for_unit("linux-tpm-fido2")
           machine.succeed("WORKDIR=/tmp/linux-tpm-fido2-smoke RP_ID=login.example.test linux-tpm-fido2-smoke assert")
         '';
