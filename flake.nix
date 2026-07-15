@@ -16,12 +16,12 @@
     { flake-parts, ... }@inputs:
     flake-parts.lib.mkFlake { inherit inputs; } {
       imports = [
+        inputs.flake-parts.flakeModules.easyOverlay
         inputs.treefmt-nix.flakeModule
         ./nix/nixos-test.nix
         ./nix/nixos-test-polkit.nix
+        ./nix/module.nix
       ];
-
-      flake.nixosModules.default = import ./nix/module.nix;
 
       systems = [
         "aarch64-darwin"
@@ -30,9 +30,18 @@
       ];
 
       perSystem =
-        { pkgs, system, ... }:
+        {
+          pkgs,
+          system,
+          config,
+          ...
+        }:
         {
           packages.default = pkgs.callPackage ./nix/package.nix { };
+
+          overlayAttrs = {
+            linux-tpm-fido2 = config.packages.default;
+          };
 
           treefmt = {
             projectRootFile = "flake.nix";

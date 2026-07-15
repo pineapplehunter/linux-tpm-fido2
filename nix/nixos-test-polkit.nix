@@ -1,3 +1,4 @@
+{ ... }@parts:
 {
   perSystem =
     {
@@ -24,7 +25,7 @@
         name = "linux-tpm-fido2-polkit";
 
         nodes.machine = {
-          imports = [ ./module.nix ];
+          imports = [ ./nixos-module.nix ];
 
           virtualisation.memorySize = 1536;
           virtualisation.tpm.enable = true;
