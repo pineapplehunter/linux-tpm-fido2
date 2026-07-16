@@ -5,8 +5,8 @@
   tpm2-tss,
 }:
 rustPlatform.buildRustPackage {
-  pname = "linux-tpm-fido2";
-  version = "0.1.0";
+  pname = (lib.fromTOML (lib.readFile ../Cargo.toml)).package.name;
+  version = (lib.fromTOML (lib.readFile ../Cargo.toml)).package.version;
   src = lib.fileset.toSource {
     root = ../.;
     fileset = lib.fileset.unions [

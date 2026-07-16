@@ -2,7 +2,7 @@ use std::{env, path::PathBuf, thread, time::Duration};
 
 use clap::Parser;
 use color_eyre::{Result, eyre::WrapErr};
-use linux_tpm_fido2::{ctaphid, hid, session, store, tpm};
+use linux_tpm_fido2::{ctap2, ctaphid, hid, session, store, tpm};
 use uhid_virt::{OutputEvent, StreamError, UHIDDevice};
 
 fn main() -> Result<()> {
@@ -11,10 +11,56 @@ fn main() -> Result<()> {
 
     let config = Config::parse();
 
+    let store_dir = absolute_path(&config.store_dir);
+
+    if config.list_credentials {
+        for credential in store::load_ctap2_credentials_from_dir(&store_dir, None)? {
+            println!(
+                "{}\t{}\t{}",
+                hex::encode(credential.id),
+                credential.rp_id,
+                credential.user_name.as_deref().unwrap_or("")
+            );
+        }
+        return Ok(());
+    }
+
+    if let Some(credential_id_hex) = &config.update_pcr_policy {
+        let credential_id = hex::decode(credential_id_hex)
+            .wrap_err_with(|| format!("invalid hex credential ID: {credential_id_hex}"))?;
+        let recovery_passphrase =
+            env::var("LINUX_TPM_FIDO2_RECOVERY_PASSPHRASE").map_err(|_| {
+                color_eyre::eyre::eyre!("LINUX_TPM_FIDO2_RECOVERY_PASSPHRASE must be set")
+            })?;
+        return ctap2::update_pcr_policy_for_credential(
+            &store_dir,
+            Some(&config.tpm_path),
+            &credential_id,
+            &recovery_passphrase,
+        );
+    }
+
+    if let Some(credential_id_hex) = &config.change_recovery_passphrase {
+        let credential_id = hex::decode(credential_id_hex)
+            .wrap_err_with(|| format!("invalid hex credential ID: {credential_id_hex}"))?;
+        let old_passphrase = env::var("LINUX_TPM_FIDO2_RECOVERY_PASSPHRASE").map_err(|_| {
+            color_eyre::eyre::eyre!("LINUX_TPM_FIDO2_RECOVERY_PASSPHRASE must be set")
+        })?;
+        let new_passphrase = env::var("LINUX_TPM_FIDO2_NEW_RECOVERY_PASSPHRASE").map_err(|_| {
+            color_eyre::eyre::eyre!("LINUX_TPM_FIDO2_NEW_RECOVERY_PASSPHRASE must be set")
+        })?;
+        return ctap2::change_recovery_passphrase(
+            &store_dir,
+            Some(&config.tpm_path),
+            &credential_id,
+            &old_passphrase,
+            &new_passphrase,
+        );
+    }
+
     log::info!("linux-tpm-fido2 starting");
     log::info!("uhid path: {}", config.uhid_path.display());
     log::info!("tpm path: {}", config.tpm_path.display());
-    let store_dir = absolute_path(&config.store_dir);
     log::info!("dev store: {}", store_dir.display());
     log::info!(
         "credential database: {}",
@@ -149,6 +195,21 @@ struct Config {
     /// Directory for development TPM-backed credentials.
     #[arg(long, default_value = store::DEV_STORE_DIR)]
     store_dir: PathBuf,
+
+    /// List credential IDs, relying-party IDs, and user names, then exit.
+    #[arg(long)]
+    list_credentials: bool,
+
+    /// Update PCR policy for a credential (hex ID) using recovery passphrase
+    /// from LINUX_TPM_FIDO2_RECOVERY_PASSPHRASE, then exit.
+    #[arg(long)]
+    update_pcr_policy: Option<String>,
+
+    /// Change recovery passphrase for a credential (hex ID).
+    /// Old passphrase from LINUX_TPM_FIDO2_RECOVERY_PASSPHRASE,
+    /// new passphrase from LINUX_TPM_FIDO2_NEW_RECOVERY_PASSPHRASE, then exit.
+    #[arg(long)]
+    change_recovery_passphrase: Option<String>,
 }
 
 fn absolute_path(path: &PathBuf) -> PathBuf {

@@ -69,6 +69,7 @@
               rustPlatform.bindgenHook
               sqlx-cli
               tpm2-tss
+              tpm2-tools
               (rust-bin.stable.latest.default.override {
                 extensions = [
                   "rust-src"

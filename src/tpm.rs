@@ -3,6 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use argon2::{Algorithm, Argon2, Params, Version};
 use color_eyre::{Result, eyre::WrapErr};
 use pbkdf2::pbkdf2_hmac;
 use sha2::{Digest as ShaDigest, Sha256};
@@ -10,10 +11,10 @@ use tss_esapi::{
     Context,
     attributes::ObjectAttributesBuilder,
     constants::{
-        SessionType,
+        CommandCode, SessionType,
         tss::{TPM2_RH_NULL, TPM2_ST_HASHCHECK},
     },
-    handles::SessionHandle,
+    handles::{ObjectHandle, SessionHandle},
     interface_types::{
         algorithm::{HashingAlgorithm, PublicAlgorithm},
         ecc::EccCurve,
@@ -22,21 +23,51 @@ use tss_esapi::{
         session_handles::{AuthSession, PolicySession},
     },
     structures::{
-        Digest, DigestList, EccPoint, EccScheme, HashScheme, PcrSelectionList,
+        Auth, Digest, DigestList, EccPoint, EccScheme, HashScheme, Name, Nonce, PcrSelectionList,
         PcrSelectionListBuilder, PcrSlot, Private, Public, PublicBuilder,
         PublicEccParametersBuilder, RsaExponent, Signature, SignatureScheme,
-        SymmetricDefinitionObject,
+        SymmetricDefinitionObject, Ticket,
     },
     tcti_ldr::TctiNameConf,
     traits::{Marshall, UnMarshall},
     tss2_esys::TPMT_TK_HASHCHECK,
     utils::{self, PublicKey},
 };
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PcrPolicyBinding {
     pub selection: String,
     pub digest: Vec<u8>,
+    pub policy_ref: Option<Vec<u8>>,
+    pub authority_name: Option<Vec<u8>>,
+    pub authority_signature: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecoveryKdf {
+    Pbkdf2Sha256 {
+        iterations: u32,
+    },
+    Argon2id {
+        memory_kib: u32,
+        iterations: u32,
+        parallelism: u32,
+    },
+}
+
+impl RecoveryKdf {
+    pub const fn argon2id_default() -> Self {
+        Self::Argon2id {
+            memory_kib: 65_536,
+            iterations: 3,
+            parallelism: 1,
+        }
+    }
+
+    pub const fn legacy_pbkdf2() -> Self {
+        Self::Pbkdf2Sha256 {
+            iterations: RECOVERY_PBKDF2_ITERATIONS,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,7 +75,9 @@ pub struct RecoveryMaterial {
     pub label: Option<String>,
     pub passphrase_salt: Vec<u8>,
     pub passphrase_hash: Vec<u8>,
+    pub kdf: RecoveryKdf,
     pub key: TpmCredential,
+    pub authority_name: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,9 +106,40 @@ pub fn check_device(path: &Path) -> std::io::Result<()> {
     std::fs::metadata(path).map(|_| ())
 }
 
+pub fn public_name(public_blob: &[u8]) -> Result<Vec<u8>> {
+    let public = Public::unmarshall(public_blob).wrap_err("unmarshalling TPM public area")?;
+    let encoded = public.marshall().wrap_err("marshalling TPM public area")?;
+    let digest = Sha256::digest(encoded);
+    let mut name = Vec::with_capacity(34);
+    name.extend_from_slice(&0x000b_u16.to_be_bytes());
+    name.extend_from_slice(&digest);
+    Ok(name)
+}
+
+pub fn credential_policy_ref(credential_id: &[u8], owner_uid: Option<u32>) -> Vec<u8> {
+    let mut value = b"linux-tpm-fido2/pcr-policy/v1".to_vec();
+    value.extend_from_slice(credential_id);
+    value.extend_from_slice(&owner_uid.unwrap_or(0).to_be_bytes());
+    Sha256::digest(value).to_vec()
+}
+
 struct PolicySessionGuard {
     context: *mut Context,
     session: PolicySession,
+}
+
+struct ObjectHandleGuard {
+    context: *mut Context,
+    handle: ObjectHandle,
+}
+
+impl Drop for ObjectHandleGuard {
+    fn drop(&mut self) {
+        // Safety: the guard is created from &mut Tpm and dropped before the
+        // &mut borrow is released, so no aliasing &mut references exist.
+        let ctx = unsafe { &mut *self.context };
+        let _ = ctx.flush_context(self.handle);
+    }
 }
 
 impl Drop for PolicySessionGuard {
@@ -117,7 +181,7 @@ impl Tpm {
     }
 
     pub fn create_credential_key(&mut self) -> Result<TpmCredential> {
-        self.create_credential_key_with_policy(None)
+        self.create_credential_key_with_auth(None)
     }
 
     pub fn create_recovery_material(
@@ -127,14 +191,18 @@ impl Tpm {
     ) -> Result<RecoveryMaterial> {
         let mut passphrase_salt = vec![0u8; 32];
         getrandom::fill(&mut passphrase_salt).wrap_err("generating recovery passphrase salt")?;
-        let key = self.create_credential_key()?;
-        let passphrase_hash = recovery_passphrase_hash(&passphrase_salt, passphrase);
+        let kdf = RecoveryKdf::argon2id_default();
+        let passphrase_hash = recovery_passphrase_hash(&kdf, &passphrase_salt, passphrase)?;
+        let key = self.create_credential_key_with_auth(Some(&passphrase_hash))?;
+        let authority_name = public_name(&key.public)?;
 
         Ok(RecoveryMaterial {
             label,
             passphrase_salt,
             passphrase_hash,
+            kdf,
             key,
+            authority_name,
         })
     }
 
@@ -142,11 +210,30 @@ impl Tpm {
         &mut self,
         policy: Option<&PcrPolicyBinding>,
     ) -> Result<TpmCredential> {
+        self.create_credential_key_with_policy_and_auth(policy, None)
+    }
+
+    fn create_credential_key_with_auth(
+        &mut self,
+        auth_value: Option<&[u8]>,
+    ) -> Result<TpmCredential> {
+        self.create_credential_key_with_policy_and_auth(None, auth_value)
+    }
+
+    fn create_credential_key_with_policy_and_auth(
+        &mut self,
+        policy: Option<&PcrPolicyBinding>,
+        auth_value: Option<&[u8]>,
+    ) -> Result<TpmCredential> {
         let parent = self.create_storage_parent()?;
-        let public = signing_key_public(policy)?;
+        let public = signing_key_public(policy, auth_value.is_some())?;
+        let auth = auth_value
+            .map(|value| Auth::try_from(value.to_vec()))
+            .transpose()
+            .wrap_err("building TPM authority auth value")?;
 
         let key = self.context.execute_with_nullauth_session(|context| {
-            context.create(parent, public, None, None, None, None)
+            context.create(parent, public, auth, None, None, None)
         });
         self.context
             .flush_context(parent.into())
@@ -166,7 +253,7 @@ impl Tpm {
                 .wrap_err("marshalling TPM credential public blob")?,
             public_key_x: x,
             public_key_y: y,
-            auth_value: None,
+            auth_value: auth_value.map(ToOwned::to_owned),
         })
     }
 
@@ -191,21 +278,272 @@ impl Tpm {
             selection_list,
         )?;
         let policy_digest = self.context.policy_get_digest(trial_session)?;
+        self.context
+            .flush_context(SessionHandle::from(trial_session).into())?;
 
         Ok(PcrPolicyBinding {
             selection: secure_boot_pcr_selection_name(),
             digest: policy_digest.value().to_vec(),
+            policy_ref: None,
+            authority_name: None,
+            authority_signature: None,
+        })
+    }
+
+    pub fn policy_with_ref_hash(policy_digest: &[u8], policy_ref: &[u8]) -> Vec<u8> {
+        let mut hasher = Sha256::new();
+        hasher.update(policy_digest);
+        hasher.update(policy_ref);
+        hasher.finalize().to_vec()
+    }
+
+    pub fn sign_recovery_policy(
+        &mut self,
+        authority: &TpmCredential,
+        approved_policy: &[u8],
+        policy_ref: &[u8],
+    ) -> Result<Vec<u8>> {
+        if approved_policy.len() != 32 {
+            color_eyre::eyre::bail!("approved PCR policy must be a SHA-256 digest");
+        }
+        let to_sign = Self::policy_with_ref_hash(approved_policy, policy_ref);
+        let parent = self.create_storage_parent()?;
+        let private = Private::try_from(authority.private.clone())?;
+        let public = Public::unmarshall(&authority.public)?;
+        let key_handle = self
+            .context
+            .execute_with_nullauth_session(|context| context.load(parent, private, public))?;
+        if let Some(auth_value) = &authority.auth_value {
+            self.context
+                .tr_set_auth(key_handle.into(), Auth::try_from(auth_value.clone())?)?;
+        }
+        let digest = Digest::try_from(to_sign)?;
+        let validation = TPMT_TK_HASHCHECK {
+            tag: TPM2_ST_HASHCHECK,
+            hierarchy: TPM2_RH_NULL,
+            digest: Default::default(),
+        };
+        let signature = self
+            .context
+            .execute_with_session(Some(AuthSession::Password), |context| {
+                context.sign(
+                    key_handle,
+                    digest,
+                    SignatureScheme::Null,
+                    validation.try_into()?,
+                )
+            })
+            .wrap_err("signing approved PCR policy")?;
+        self.context.flush_context(key_handle.into())?;
+        self.context.flush_context(parent.into())?;
+        signature
+            .marshall()
+            .wrap_err("marshalling approved PCR policy signature")
+    }
+
+    pub fn create_authorized_policy(
+        &mut self,
+        approved: &PcrPolicyBinding,
+        authority: &TpmCredential,
+        policy_ref: &[u8],
+    ) -> Result<PcrPolicyBinding> {
+        let policy_digest = &approved.digest;
+        let to_sign = Self::policy_with_ref_hash(policy_digest, policy_ref);
+        let signature_bytes = self.sign_recovery_policy(authority, policy_digest, policy_ref)?;
+        let signature = Signature::unmarshall(&signature_bytes)?;
+        let parent = self.create_storage_parent()?;
+        let key_handle = self.context.execute_with_nullauth_session(|context| {
+            context.load(
+                parent,
+                Private::try_from(authority.private.clone())?,
+                Public::unmarshall(&authority.public)?,
+            )
+        })?;
+        let (_, authority_name, _) = self.context.read_public(key_handle)?;
+        let authority_name_bytes = authority_name.value().to_vec();
+        if let Some(auth_value) = &authority.auth_value {
+            self.context
+                .tr_set_auth(key_handle.into(), Auth::try_from(auth_value.clone())?)?;
+        }
+        log::debug!(
+            "create_authorized_policy: policy_digest={} hex={}, to_sign={} hex={}, policy_ref={} bytes, key_name={} bytes",
+            policy_digest.len(),
+            hex::encode(policy_digest),
+            to_sign.len(),
+            hex::encode(&to_sign),
+            policy_ref.len(),
+            authority_name_bytes.len(),
+        );
+        let ticket = self.context.execute_without_session(|context| {
+            context.verify_signature(key_handle, Digest::try_from(to_sign)?, signature)
+        })?;
+        log::debug!(
+            "verify_signature produced ticket: tag={:?}, hierarchy={:?}, ticket_digest={} hex={}",
+            ticket.tag(),
+            ticket.hierarchy(),
+            ticket.digest().len(),
+            hex::encode(ticket.digest()),
+        );
+        self.context.flush_context(parent.into())?;
+
+        let selection = secure_boot_pcr_selection_list()?;
+        let current_digest = self.current_pcr_digest(&selection)?;
+        let session = self
+            .context
+            .start_auth_session(
+                None,
+                None,
+                None,
+                SessionType::Trial,
+                tss_esapi::structures::SymmetricDefinition::AES_256_CFB,
+                HashingAlgorithm::Sha256,
+            )?
+            .ok_or_else(|| color_eyre::eyre::eyre!("TPM returned no trial policy session"))?;
+        let session = PolicySession::try_from(session)?;
+        self.context
+            .policy_pcr(session, Digest::try_from(current_digest)?, selection)?;
+        self.context.policy_authorize(
+            session,
+            Digest::try_from(policy_digest.clone())?,
+            Nonce::try_from(policy_ref.to_vec())?,
+            &Name::try_from(authority_name_bytes.clone())?,
+            ticket,
+        )?;
+        self.context.flush_context(key_handle.into())?;
+        self.context
+            .policy_command_code(session, CommandCode::Sign)?;
+        let final_digest = self.context.policy_get_digest(session)?;
+        self.context
+            .flush_context(SessionHandle::from(session).into())?;
+
+        Ok(PcrPolicyBinding {
+            selection: approved.selection.clone(),
+            digest: final_digest.value().to_vec(),
+            policy_ref: Some(policy_ref.to_vec()),
+            authority_name: Some(authority_name_bytes),
+            authority_signature: Some(signature_bytes),
+        })
+    }
+
+    pub fn update_authorized_policy(
+        &mut self,
+        authority: &TpmCredential,
+        authority_name: &[u8],
+        policy_ref: &[u8],
+    ) -> Result<PcrPolicyBinding> {
+        let selection = secure_boot_pcr_selection_list()?;
+        let current_digest = self.current_pcr_digest(&selection)?;
+        let trial_session = self
+            .context
+            .start_auth_session(
+                None,
+                None,
+                None,
+                SessionType::Trial,
+                tss_esapi::structures::SymmetricDefinition::AES_256_CFB,
+                HashingAlgorithm::Sha256,
+            )?
+            .ok_or_else(|| color_eyre::eyre::eyre!("TPM returned no trial policy session"))?;
+        let trial_session = PolicySession::try_from(trial_session)?;
+        self.context.policy_pcr(
+            trial_session,
+            Digest::try_from(current_digest.clone())?,
+            selection.clone(),
+        )?;
+        let pcr_policy_digest = self.context.policy_get_digest(trial_session)?;
+        self.context
+            .flush_context(SessionHandle::from(trial_session).into())?;
+
+        let to_sign = Self::policy_with_ref_hash(pcr_policy_digest.value(), policy_ref);
+        let parent = self.create_storage_parent()?;
+        let key_handle = self
+            .context
+            .execute_with_nullauth_session(|context| {
+                context.load(
+                    parent,
+                    Private::try_from(authority.private.clone())?,
+                    Public::unmarshall(&authority.public)?,
+                )
+            })
+            .wrap_err("loading authority key for PCR update")?;
+        if let Some(auth_value) = &authority.auth_value {
+            self.context
+                .tr_set_auth(key_handle.into(), Auth::try_from(auth_value.clone())?)?;
+        }
+        let validation = TPMT_TK_HASHCHECK {
+            tag: TPM2_ST_HASHCHECK,
+            hierarchy: TPM2_RH_NULL,
+            digest: Default::default(),
+        };
+        let signature = self
+            .context
+            .execute_with_session(Some(AuthSession::Password), |context| {
+                context.sign(
+                    key_handle,
+                    Digest::try_from(to_sign.clone())?,
+                    SignatureScheme::Null,
+                    validation.try_into()?,
+                )
+            })
+            .wrap_err("signing updated PCR policy with authority key")?;
+        let ticket = self
+            .context
+            .execute_without_session(|context| {
+                context.verify_signature(key_handle, Digest::try_from(to_sign)?, signature.clone())
+            })
+            .wrap_err("verifying updated PCR policy signature")?;
+        self.context.flush_context(key_handle.into())?;
+
+        let new_session = self
+            .context
+            .start_auth_session(
+                None,
+                None,
+                None,
+                SessionType::Trial,
+                tss_esapi::structures::SymmetricDefinition::AES_256_CFB,
+                HashingAlgorithm::Sha256,
+            )?
+            .ok_or_else(|| color_eyre::eyre::eyre!("TPM returned no trial policy session"))?;
+        let new_session = PolicySession::try_from(new_session)?;
+        self.context
+            .policy_pcr(new_session, Digest::try_from(current_digest)?, selection)?;
+        self.context.policy_authorize(
+            new_session,
+            pcr_policy_digest,
+            Nonce::try_from(policy_ref.to_vec())?,
+            &Name::try_from(authority_name.to_vec())?,
+            ticket,
+        )?;
+        self.context
+            .policy_command_code(new_session, CommandCode::Sign)?;
+        let final_digest = self.context.policy_get_digest(new_session)?;
+        self.context
+            .flush_context(SessionHandle::from(new_session).into())?;
+        self.context.flush_context(parent.into())?;
+
+        let signature_bytes = signature
+            .marshall()
+            .wrap_err("marshalling updated PCR policy signature")?;
+
+        Ok(PcrPolicyBinding {
+            selection: secure_boot_pcr_selection_name(),
+            digest: final_digest.value().to_vec(),
+            policy_ref: Some(policy_ref.to_vec()),
+            authority_name: Some(authority_name.to_vec()),
+            authority_signature: Some(signature_bytes),
         })
     }
 
     pub fn sign_digest(&mut self, credential: &TpmCredential, digest: &[u8]) -> Result<Vec<u8>> {
-        self.sign_digest_with_policy(credential, None, digest)
+        self.sign_digest_with_policy(credential, None, None, digest)
     }
 
     pub fn sign_digest_with_policy(
         &mut self,
         credential: &TpmCredential,
         policy: Option<&PcrPolicyBinding>,
+        authority: Option<&TpmCredential>,
         digest: &[u8],
     ) -> Result<Vec<u8>> {
         if digest.len() != 32 {
@@ -213,6 +551,10 @@ impl Tpm {
         }
 
         let parent = self.create_storage_parent()?;
+        let _parent_guard = ObjectHandleGuard {
+            context: &mut self.context as *mut Context,
+            handle: parent.into(),
+        };
         let private = Private::try_from(credential.private.clone())
             .wrap_err("building TPM credential private blob")?;
         let public = Public::unmarshall(&credential.public)
@@ -221,6 +563,10 @@ impl Tpm {
             .context
             .execute_with_nullauth_session(|context| context.load(parent, private, public))
             .wrap_err("loading TPM credential signing key")?;
+        let _key_guard = ObjectHandleGuard {
+            context: &mut self.context as *mut Context,
+            handle: key_handle.into(),
+        };
 
         let digest = Digest::try_from(digest.to_vec()).wrap_err("building TPM signing digest")?;
         let validation = TPMT_TK_HASHCHECK {
@@ -229,7 +575,19 @@ impl Tpm {
             digest: Default::default(),
         };
 
-        let signature = if policy.is_some() {
+        let signature = if let (
+            Some(_policy),
+            Some(authority),
+            Some(policy_ref),
+            Some(authority_name),
+            Some(authority_signature),
+        ) = (
+            policy,
+            authority,
+            policy.and_then(|policy| policy.policy_ref.as_ref()),
+            policy.and_then(|policy| policy.authority_name.as_ref()),
+            policy.and_then(|policy| policy.authority_signature.as_ref()),
+        ) {
             let selection_list = secure_boot_pcr_selection_list()?;
             let current_digest = self.current_pcr_digest(&selection_list)?;
             let policy_session = self
@@ -244,17 +602,109 @@ impl Tpm {
                 )?
                 .ok_or_else(|| color_eyre::eyre::eyre!("TPM returned no policy session"))?;
             let policy_session = PolicySession::try_from(policy_session)?;
+            let _policy_session_guard = PolicySessionGuard {
+                context: &mut self.context as *mut Context,
+                session: policy_session,
+            };
+            self.context.policy_pcr(
+                policy_session,
+                Digest::try_from(current_digest.clone())?,
+                selection_list,
+            )?;
+            let approved_policy = self.context.policy_get_digest(policy_session)?;
+            let authority_handle = self.context.execute_with_nullauth_session(|context| {
+                context.load(
+                    parent,
+                    Private::try_from(authority.private.clone())?,
+                    Public::unmarshall(&authority.public)?,
+                )
+            })?;
+            let _authority_guard = ObjectHandleGuard {
+                context: &mut self.context as *mut Context,
+                handle: authority_handle.into(),
+            };
+            let (_, actual_name, _) = self.context.read_public(authority_handle)?;
+            if actual_name.value() != authority_name.as_slice() {
+                color_eyre::eyre::bail!("recovery authority name does not match the credential");
+            }
+            if let Some(auth_value) = &authority.auth_value {
+                self.context
+                    .tr_set_auth(authority_handle.into(), Auth::try_from(auth_value.clone())?)?;
+            }
+            log::debug!(
+                "policy_authorize: approved_policy={} hex={}, policy_ref={} bytes, key_name={} bytes, key_name_hex={}",
+                approved_policy.len(),
+                hex::encode(approved_policy.value()),
+                policy_ref.len(),
+                actual_name.value().len(),
+                hex::encode(actual_name.value()),
+            );
+            // Per TPM spec, PolicyAuthorize computes
+            //   aHash = hash(nameAlg of keySign, approvedPolicy || policyRef)
+            // and validates the ticket against aHash, not against approvedPolicy
+            // directly.  We must therefore verify the stored signature over
+            // SHA-256(approvedPolicy || policyRef), not over approvedPolicy alone.
+            let to_sign = Self::policy_with_ref_hash(approved_policy.value(), policy_ref);
+            let ticket = self
+                .context
+                .execute_without_session(|context| {
+                    context.verify_signature(
+                        authority_handle,
+                        Digest::try_from(to_sign)?,
+                        Signature::unmarshall(authority_signature)?,
+                    )
+                })
+                .wrap_err("verifying PCR policy authority signature")?;
+            log::debug!(
+                "verify_signature ticket: tag={:?} hierarchy={:?} digest={} hex={}",
+                ticket.tag(),
+                ticket.hierarchy(),
+                ticket.digest().len(),
+                hex::encode(ticket.digest()),
+            );
+            self.context.policy_authorize(
+                policy_session,
+                approved_policy,
+                Nonce::try_from(policy_ref.clone())?,
+                &actual_name,
+                ticket,
+            )?;
+            self.context
+                .policy_command_code(policy_session, CommandCode::Sign)?;
+
+            self.context
+                .execute_with_session(Some(AuthSession::from(policy_session)), |context| {
+                    context.sign(
+                        key_handle,
+                        digest.clone(),
+                        SignatureScheme::Null,
+                        validation.try_into()?,
+                    )
+                })
+        } else if policy.is_some() {
+            let selection_list = secure_boot_pcr_selection_list()?;
+            let current_digest = self.current_pcr_digest(&selection_list)?;
+            let policy_session = self
+                .context
+                .start_auth_session(
+                    None,
+                    None,
+                    None,
+                    SessionType::Policy,
+                    tss_esapi::structures::SymmetricDefinition::AES_256_CFB,
+                    HashingAlgorithm::Sha256,
+                )?
+                .ok_or_else(|| color_eyre::eyre::eyre!("TPM returned no policy session"))?;
+            let policy_session = PolicySession::try_from(policy_session)?;
+            let _policy_session_guard = PolicySessionGuard {
+                context: &mut self.context as *mut Context,
+                session: policy_session,
+            };
             self.context.policy_pcr(
                 policy_session,
                 Digest::try_from(current_digest)?,
                 selection_list,
             )?;
-
-            let _guard = PolicySessionGuard {
-                context: &mut self.context as *mut Context,
-                session: policy_session,
-            };
-
             self.context
                 .execute_with_session(Some(AuthSession::from(policy_session)), |context| {
                     context.sign(
@@ -275,12 +725,6 @@ impl Tpm {
             })
         };
 
-        self.context
-            .flush_context(key_handle.into())
-            .wrap_err("flushing loaded TPM credential key")?;
-        self.context
-            .flush_context(parent.into())
-            .wrap_err("flushing transient TPM storage parent")?;
         let signature = signature.wrap_err("signing digest with TPM credential key")?;
         let Signature::EcDsa(signature) = signature else {
             color_eyre::eyre::bail!("TPM returned non-ECDSA signature");
@@ -290,6 +734,47 @@ impl Tpm {
             signature.signature_r().value(),
             signature.signature_s().value(),
         ))
+    }
+
+    pub fn change_key_auth(
+        &mut self,
+        credential: &TpmCredential,
+        new_auth_value: &[u8],
+    ) -> Result<TpmCredential> {
+        let parent = self.create_storage_parent()?;
+        let private =
+            Private::try_from(credential.private.clone()).wrap_err("building TPM private blob")?;
+        let public =
+            Public::unmarshall(&credential.public).wrap_err("unmarshalling TPM public blob")?;
+        let key_handle = self
+            .context
+            .execute_with_nullauth_session(|context| context.load(parent, private, public))
+            .wrap_err("loading TPM credential for auth change")?;
+
+        if let Some(auth_value) = &credential.auth_value {
+            self.context
+                .tr_set_auth(key_handle.into(), Auth::try_from(auth_value.clone())?)?;
+        }
+
+        let new_auth_data = new_auth_value.to_vec();
+        let tpm_new_auth = Auth::try_from(new_auth_data.clone())?;
+        let new_private = self
+            .context
+            .execute_with_session(Some(AuthSession::Password), |context| {
+                context.object_change_auth(key_handle.into(), parent.into(), tpm_new_auth)
+            })
+            .wrap_err("changing TPM credential authorization")?;
+
+        self.context.flush_context(key_handle.into())?;
+        self.context.flush_context(parent.into())?;
+
+        Ok(TpmCredential {
+            private: new_private.value().to_vec(),
+            public: credential.public.clone(),
+            public_key_x: credential.public_key_x.clone(),
+            public_key_y: credential.public_key_y.clone(),
+            auth_value: Some(new_auth_data),
+        })
     }
 
     fn current_pcr_digest(&mut self, selection_list: &PcrSelectionList) -> Result<Vec<u8>> {
@@ -303,7 +788,7 @@ impl Tpm {
     }
 
     fn probe_ecc_signing(&mut self) -> Result<()> {
-        let public = signing_key_public(None)?;
+        let public = signing_key_public(None, true)?;
 
         let key_handle = self
             .context
@@ -360,12 +845,12 @@ impl Tpm {
     }
 }
 
-fn signing_key_public(policy: Option<&PcrPolicyBinding>) -> Result<Public> {
+fn signing_key_public(policy: Option<&PcrPolicyBinding>, user_with_auth: bool) -> Result<Public> {
     let object_attributes = ObjectAttributesBuilder::new()
         .with_fixed_tpm(true)
         .with_fixed_parent(true)
         .with_sensitive_data_origin(true)
-        .with_user_with_auth(true)
+        .with_user_with_auth(user_with_auth)
         .with_decrypt(false)
         .with_sign_encrypt(true)
         .with_restricted(false)
@@ -407,23 +892,49 @@ fn secure_boot_pcr_selection_name() -> String {
 
 const RECOVERY_PBKDF2_ITERATIONS: u32 = 600_000;
 
-pub fn recovery_passphrase_hash(passphrase_salt: &[u8], passphrase: &str) -> Vec<u8> {
+pub fn recovery_passphrase_hash(
+    kdf: &RecoveryKdf,
+    passphrase_salt: &[u8],
+    passphrase: &str,
+) -> Result<Vec<u8>> {
     let mut output = vec![0u8; 32];
-    pbkdf2_hmac::<Sha256>(
-        passphrase.as_bytes(),
-        passphrase_salt,
-        RECOVERY_PBKDF2_ITERATIONS,
-        &mut output,
-    );
-    output
+    match kdf {
+        RecoveryKdf::Pbkdf2Sha256 { iterations } => {
+            pbkdf2_hmac::<Sha256>(
+                passphrase.as_bytes(),
+                passphrase_salt,
+                *iterations,
+                &mut output,
+            );
+        }
+        RecoveryKdf::Argon2id {
+            memory_kib,
+            iterations,
+            parallelism,
+        } => {
+            let params = Params::new(*memory_kib, *iterations, *parallelism, Some(output.len()))
+                .map_err(|error| {
+                    color_eyre::eyre::eyre!("building Argon2id recovery KDF parameters: {error:?}")
+                })?;
+            Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+                .hash_password_into(passphrase.as_bytes(), passphrase_salt, &mut output)
+                .map_err(|error| {
+                    color_eyre::eyre::eyre!(
+                        "deriving Argon2id recovery authorization value: {error:?}"
+                    )
+                })?;
+        }
+    }
+    Ok(output)
 }
 
 pub fn recovery_passphrase_matches(
+    kdf: &RecoveryKdf,
     passphrase_salt: &[u8],
     passphrase: &str,
     expected_hash: &[u8],
-) -> bool {
-    recovery_passphrase_hash(passphrase_salt, passphrase) == expected_hash
+) -> Result<bool> {
+    Ok(recovery_passphrase_hash(kdf, passphrase_salt, passphrase)? == expected_hash)
 }
 
 fn ecdsa_der(r: &[u8], s: &[u8]) -> Vec<u8> {
@@ -460,38 +971,59 @@ fn der_integer(value: &[u8]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{recovery_passphrase_hash, recovery_passphrase_matches};
+    use super::{RecoveryKdf, recovery_passphrase_hash, recovery_passphrase_matches};
 
     #[test]
     fn recovery_passphrase_hash_uses_pbkdf2_is_deterministic() {
         let salt = b"0123456789abcdef0123456789abcdef";
-        let hash = recovery_passphrase_hash(salt, "correct horse battery staple");
+        let kdf = RecoveryKdf::legacy_pbkdf2();
+        let hash = recovery_passphrase_hash(&kdf, salt, "correct horse battery staple")
+            .expect("derive PBKDF2 hash");
 
         assert_eq!(hash.len(), 32, "PBKDF2 output should be 32 bytes (SHA-256)");
         assert_eq!(
             hash,
-            recovery_passphrase_hash(salt, "correct horse battery staple"),
+            recovery_passphrase_hash(&kdf, salt, "correct horse battery staple")
+                .expect("derive PBKDF2 hash"),
             "PBKDF2 should be deterministic with same salt and passphrase"
         );
-        assert!(recovery_passphrase_matches(
-            salt,
-            "correct horse battery staple",
-            &hash
-        ));
-        assert!(!recovery_passphrase_matches(
-            salt,
-            "wrong horse battery staple",
-            &hash
-        ));
+        assert!(
+            recovery_passphrase_matches(&kdf, salt, "correct horse battery staple", &hash)
+                .expect("verify correct passphrase")
+        );
+        assert!(
+            !recovery_passphrase_matches(&kdf, salt, "wrong horse battery staple", &hash)
+                .expect("verify wrong passphrase")
+        );
     }
 
     #[test]
     fn recovery_passphrase_hash_different_salt_gives_different_hash() {
-        let hash1 = recovery_passphrase_hash(b"salt1", "passphrase");
-        let hash2 = recovery_passphrase_hash(b"salt2", "passphrase");
+        let kdf = RecoveryKdf::argon2id_default();
+        let hash1 = recovery_passphrase_hash(&kdf, b"salt-one", "passphrase")
+            .expect("derive Argon2id hash");
+        let hash2 = recovery_passphrase_hash(&kdf, b"salt-two", "passphrase")
+            .expect("derive Argon2id hash");
         assert_ne!(
             hash1, hash2,
             "different salts must produce different hashes"
+        );
+    }
+
+    #[test]
+    fn recovery_argon2id_rejects_wrong_passphrase() {
+        let kdf = RecoveryKdf::argon2id_default();
+        let salt = b"0123456789abcdef0123456789abcdef";
+        let hash = recovery_passphrase_hash(&kdf, salt, "correct horse battery staple")
+            .expect("derive Argon2id hash");
+
+        assert!(
+            recovery_passphrase_matches(&kdf, salt, "correct horse battery staple", &hash,)
+                .expect("verify correct passphrase")
+        );
+        assert!(
+            !recovery_passphrase_matches(&kdf, salt, "wrong passphrase", &hash)
+                .expect("verify wrong passphrase")
         );
     }
 }

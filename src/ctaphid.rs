@@ -50,10 +50,8 @@ const MAX_PAYLOAD_SIZE: usize = (REPORT_SIZE - 7) + 128 * (REPORT_SIZE - 5);
 
 pub struct PacketHandler {
     pending: HashMap<u32, PendingRequest>,
-    authenticators: HashMap<u32, ctap2::Authenticator>,
     next_cid: u32,
-    store_dir: PathBuf,
-    tpm_path: Option<PathBuf>,
+    authenticator: ctap2::Authenticator,
 }
 
 impl Default for PacketHandler {
@@ -81,10 +79,8 @@ impl PacketHandler {
     pub fn new(store_dir: PathBuf, tpm_path: Option<PathBuf>) -> Self {
         Self {
             pending: HashMap::new(),
-            authenticators: HashMap::new(),
             next_cid: 1,
-            store_dir,
-            tpm_path,
+            authenticator: ctap2::Authenticator::new(store_dir, tpm_path),
         }
     }
 
@@ -187,9 +183,6 @@ impl PacketHandler {
                 } else {
                     cid
                 };
-                self.authenticators.entry(allocated_cid).or_insert_with(|| {
-                    ctap2::Authenticator::new(self.store_dir.clone(), self.tpm_path.clone())
-                });
                 handle_init(cid, allocated_cid, payload)
             }
             CtapHidCommand::Ping => Response {
@@ -202,31 +195,18 @@ impl PacketHandler {
                 command: CtapHidCommand::Wink,
                 payload: Vec::new(),
             },
-            CtapHidCommand::Cbor => {
-                let authenticator = self.authenticator_for(cid);
-                Response {
-                    cid,
-                    command: CtapHidCommand::Cbor,
-                    payload: authenticator.handle_cbor(payload),
-                }
-            }
+            CtapHidCommand::Cbor => Response {
+                cid,
+                command: CtapHidCommand::Cbor,
+                payload: self.authenticator.handle_cbor(payload),
+            },
             CtapHidCommand::Cancel => {
                 self.pending.remove(&cid);
-                if let Some(authenticator) = self.authenticators.get_mut(&cid) {
-                    authenticator.cancel_pending();
-                }
+                self.authenticator.cancel_pending();
                 error(cid, CtapHidError::Command)
             }
             CtapHidCommand::Error => error(cid, CtapHidError::Command),
         }
-    }
-
-    fn authenticator_for(&mut self, cid: u32) -> &mut ctap2::Authenticator {
-        let store_dir = self.store_dir.clone();
-        let tpm_path = self.tpm_path.clone();
-        self.authenticators
-            .entry(cid)
-            .or_insert_with(|| ctap2::Authenticator::new(store_dir, tpm_path))
     }
 }
 
