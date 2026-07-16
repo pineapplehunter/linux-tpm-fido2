@@ -14,7 +14,118 @@ Move the task to the end of "Completed" when finished with a timestamp like "(fi
 
 ### Next Tasks
 
-*(none)*
+#### 1. Browser-managed credential selection
+
+- [x] Correct credential filtering for authenticatorGetAssertion. (finished 26-07-16)
+- [x] Respect allowList when provided. (finished 26-07-16)
+- [x] When allowList is absent, collect all discoverable credentials matching the RP ID. (finished 26-07-16)
+- [x] Return the first assertion with numberOfCredentials. (finished 26-07-16)
+- [x] Store the remaining assertions in transaction-scoped state. (finished 26-07-16)
+- [x] Implement authenticatorGetNextAssertion. (finished 26-07-16)
+- [x] Clear pending assertions after timeout, cancellation, session change, or a new request. (finished 26-07-16)
+- [x] Do not expose user.name or user.displayName unless user verification succeeded. (finished 26-07-16)
+- [ ] Test selection with multiple GitHub accounts for the same RP.
+- [ ] Test resident and non-resident credentials separately.
+
+Completion criterion: Chrome/Firefox displays its account chooser and successfully retrieves the selected assertion.
+
+#### 2. PIN and user verification
+
+Protocol foundation
+
+- [x] Implement CTAP command authenticatorClientPIN (0x06). (finished 26-07-16)
+- [x] Implement PIN/UV Auth Protocol 2. (finished 26-07-16)
+- [x] Add ephemeral ECDH key agreement. (finished 26-07-16)
+- [x] Implement encrypted PIN data handling. (finished 26-07-16)
+- [x] Implement pinUvAuthToken generation and storage. (finished 26-07-16)
+- [x] Scope tokens by permissions and RP ID. (finished 26-07-16)
+- [x] Validate pinUvAuthParam for protected commands. (finished 26-07-16)
+- [ ] Clear tokens after timeout, logout, session switch, daemon restart, and relevant failures.
+
+Authenticator PIN operations
+
+- [x] Implement getRetries. (finished 26-07-16)
+- [x] Implement getKeyAgreement. (finished 26-07-16)
+- [x] Implement setPIN. (finished 26-07-16)
+- [x] Implement changePIN. (finished 26-07-16)
+- [x] Implement getPinUvAuthTokenUsingPinWithPermissions. (finished 26-07-16)
+- [x] Store the PIN verifier using a TPM-protected or otherwise hardened mechanism. (finished 26-07-16)
+- [x] Persist retry state securely. (finished 26-07-16)
+- [ ] Implement temporary and permanent PIN blocking behavior.
+- [x] Prevent offline PIN guessing from database contents. (finished 26-07-16)
+
+Polkit-backed user verification
+
+- [x] Implement getPinUvAuthTokenUsingUvWithPermissions. (finished 26-07-16)
+- [x] Invoke polkit against the active logind session. (finished 26-07-16)
+- [x] Generate a token only after successful polkit authentication. (finished 26-07-16)
+- [x] Revalidate the active session after authentication. (finished 26-07-16)
+- [ ] Connect CTAPHID cancellation to the pending polkit operation.
+- [x] Set the authenticator-data UV flag only after valid UV. (finished 26-07-16)
+- [x] Keep user presence (UP) and user verification (UV) logically separate. (finished 26-07-16)
+
+Advertised capabilities
+
+- [x] Report clientPin accurately in authenticatorGetInfo. (finished 26-07-16)
+- [x] Report uv accurately. (finished 26-07-16)
+- [x] Advertise pinUvAuthProtocols: [2]. (finished 26-07-16)
+- [x] Update the reported options when a PIN is configured or removed. (finished 26-07-16)
+
+Completion criterion: GitHub accepts registration and authentication when user verification is required, using either the authenticator PIN or polkit-backed UV.
+
+#### 3. fido2-manage compatibility
+
+Credential-management protocol
+
+- [x] Implement authenticatorCredentialManagement (0x0A). (finished 26-07-16)
+- [x] Advertise the credMgmt capability in authenticatorGetInfo. (finished 26-07-16)
+- [x] Implement getCredsMetadata. (finished 26-07-16)
+- [x] Implement enumerateRPsBegin. (finished 26-07-16)
+- [x] Implement enumerateRPsGetNextRP. (finished 26-07-16)
+- [x] Implement enumerateCredentialsBegin. (finished 26-07-16)
+- [x] Implement enumerateCredentialsGetNextCredential. (finished 26-07-16)
+- [x] Implement deleteCredential. (finished 26-07-16)
+- [x] Implement updateUserInformation, if supported by the credential store. (finished 26-07-16)
+- [x] Require a credential-management pinUvAuthToken permission. (finished 26-07-16)
+- [x] Validate pinUvAuthParam for every protected management operation. (finished 26-07-16)
+- [x] Restrict enumeration and modification to the active session UID. (finished 26-07-16)
+- [x] Invalidate enumeration state on timeout, cancellation, or another command. (finished 26-07-16)
+
+Storage changes
+
+- [x] Ensure each credential stores all metadata required for enumeration. (finished 26-07-16)
+- [ ] Store RP entity data separately from user entity data where appropriate.
+- [x] Add indexed lookup by owner UID, RP ID, and credential ID. (finished 26-07-16)
+- [x] Make deletion transactional. (finished 26-07-16)
+- [ ] Remove associated TPM objects and sensitive metadata during deletion.
+- [ ] Define behavior when TPM cleanup succeeds but database deletion fails, and vice versa.
+
+Compatibility testing
+
+- [ ] Test fido2-token -L.
+- [ ] Test authenticator information retrieval.
+- [ ] Test resident-credential enumeration.
+- [ ] Test credential deletion.
+- [ ] Test user-information updates.
+- [ ] Test incorrect PIN and retry reporting.
+- [ ] Test multiple local Linux users.
+- [ ] Test against the latest packaged libfido2 on supported distributions.
+
+Completion criterion: fido2-manage/fido2-token can inspect the authenticator, enumerate discoverable credentials, and delete credentials without accessing the project database directly.
+
+#### Cross-cutting prerequisites
+
+- [ ] Move CTAP command processing out of the blocking UHID read loop.
+- [ ] Implement CTAPHID keepalive messages while waiting for PIN or polkit interaction.
+- [x] Implement CTAPHID_CANCEL. (finished 26-07-16)
+- [x] Maintain isolated state per CTAPHID channel. (finished 26-07-16)
+- [ ] Limit concurrent interactive and management operations.
+- [ ] Recreate or invalidate device state when the active logind session changes.
+- [ ] Add protocol-level tests using recorded CBOR request and response vectors.
+- [ ] Add integration tests using a software TPM and virtual UHID device.
+- [ ] Fail closed on malformed requests, unavailable UI, session changes, and authorization timeouts.
+
+Recovery and PCR-policy migration are intentionally outside this implementation plan.
 
 ### Completed
 
@@ -91,6 +202,7 @@ Move the task to the end of "Completed" when finished with a timestamp like "(fi
 - When switching to a new task put the task under "## In Progress" in the plan.md file.
 - When the current task is moderately large split them up into subtasks and prepenthem in the "Next Tasks" Section
 - The "Next Tasks" section should not have any items that are done. If there are, check if they are actually done and if so, move them to Completed.
+- Use subagents and delegate tasks when possible.
 
 
 ## Security model design

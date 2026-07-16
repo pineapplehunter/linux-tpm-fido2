@@ -1,6 +1,6 @@
-use std::path::PathBuf;
+use std::{collections::HashMap, path::PathBuf};
 
-use crate::{ctap2, hid::REPORT_SIZE};
+use crate::{ctap2, hid::REPORT_SIZE, store};
 
 pub const BROADCAST_CID: u32 = 0xffff_ffff;
 
@@ -48,10 +48,18 @@ const CAPABILITY_NMSG: u8 = 0x08;
 
 const MAX_PAYLOAD_SIZE: usize = (REPORT_SIZE - 7) + 128 * (REPORT_SIZE - 5);
 
-#[derive(Default)]
 pub struct PacketHandler {
-    pending: Option<PendingRequest>,
-    authenticator: ctap2::Authenticator,
+    pending: HashMap<u32, PendingRequest>,
+    authenticators: HashMap<u32, ctap2::Authenticator>,
+    next_cid: u32,
+    store_dir: PathBuf,
+    tpm_path: Option<PathBuf>,
+}
+
+impl Default for PacketHandler {
+    fn default() -> Self {
+        Self::new(store::dev_store_dir(), None)
+    }
 }
 
 #[derive(Debug)]
@@ -72,8 +80,11 @@ pub enum PacketOutcome {
 impl PacketHandler {
     pub fn new(store_dir: PathBuf, tpm_path: Option<PathBuf>) -> Self {
         Self {
-            pending: None,
-            authenticator: ctap2::Authenticator::new(store_dir.clone(), tpm_path),
+            pending: HashMap::new(),
+            authenticators: HashMap::new(),
+            next_cid: 1,
+            store_dir,
+            tpm_path,
         }
     }
 
@@ -100,7 +111,7 @@ impl PacketHandler {
     ) -> Option<PacketOutcome> {
         let payload_len = u16::from_be_bytes([report[5], report[6]]) as usize;
         if payload_len > MAX_PAYLOAD_SIZE {
-            self.pending = None;
+            self.pending.remove(&cid);
             return Some(PacketOutcome::Response(error(cid, CtapHidError::Length)));
         }
 
@@ -113,19 +124,22 @@ impl PacketHandler {
         payload.extend_from_slice(&report[7..7 + first_len]);
 
         if payload.len() == payload_len {
-            self.pending = None;
+            self.pending.remove(&cid);
             return Some(PacketOutcome::Response(
                 self.dispatch(cid, command, &payload),
             ));
         }
 
-        self.pending = Some(PendingRequest {
+        self.pending.insert(
             cid,
-            command,
-            expected_len: payload_len,
-            payload,
-            next_sequence: 0,
-        });
+            PendingRequest {
+                cid,
+                command,
+                expected_len: payload_len,
+                payload,
+                next_sequence: 0,
+            },
+        );
         Some(PacketOutcome::NeedMore)
     }
 
@@ -135,11 +149,11 @@ impl PacketHandler {
         sequence: u8,
         report: &[u8],
     ) -> Option<PacketOutcome> {
-        let pending = self.pending.as_mut()?;
+        let pending = self.pending.get_mut(&cid)?;
 
         if pending.cid != cid || pending.next_sequence != sequence {
             let error_cid = pending.cid;
-            self.pending = None;
+            self.pending.remove(&cid);
             return Some(PacketOutcome::Response(error(error_cid, CtapHidError::Seq)));
         }
 
@@ -148,7 +162,7 @@ impl PacketHandler {
         pending.payload.extend_from_slice(&report[5..5 + chunk_len]);
 
         if pending.payload.len() == pending.expected_len {
-            let pending = self.pending.take().expect("pending request");
+            let pending = self.pending.remove(&cid).expect("pending request");
             Some(PacketOutcome::Response(self.dispatch(
                 pending.cid,
                 pending.command,
@@ -162,7 +176,22 @@ impl PacketHandler {
 
     fn dispatch(&mut self, cid: u32, command: CtapHidCommand, payload: &[u8]) -> Response {
         match command {
-            CtapHidCommand::Init => handle_init(cid, payload),
+            CtapHidCommand::Init => {
+                let allocated_cid = if cid == BROADCAST_CID {
+                    if self.next_cid == 0 {
+                        self.next_cid = 1;
+                    }
+                    let allocated = self.next_cid;
+                    self.next_cid = self.next_cid.wrapping_add(1).max(1);
+                    allocated
+                } else {
+                    cid
+                };
+                self.authenticators.entry(allocated_cid).or_insert_with(|| {
+                    ctap2::Authenticator::new(self.store_dir.clone(), self.tpm_path.clone())
+                });
+                handle_init(cid, allocated_cid, payload)
+            }
             CtapHidCommand::Ping => Response {
                 cid,
                 command: CtapHidCommand::Ping,
@@ -173,14 +202,31 @@ impl PacketHandler {
                 command: CtapHidCommand::Wink,
                 payload: Vec::new(),
             },
-            CtapHidCommand::Cbor => Response {
-                cid,
-                command: CtapHidCommand::Cbor,
-                payload: self.authenticator.handle_cbor(payload),
-            },
-            CtapHidCommand::Cancel => error(cid, CtapHidError::Command),
+            CtapHidCommand::Cbor => {
+                let authenticator = self.authenticator_for(cid);
+                Response {
+                    cid,
+                    command: CtapHidCommand::Cbor,
+                    payload: authenticator.handle_cbor(payload),
+                }
+            }
+            CtapHidCommand::Cancel => {
+                self.pending.remove(&cid);
+                if let Some(authenticator) = self.authenticators.get_mut(&cid) {
+                    authenticator.cancel_pending();
+                }
+                error(cid, CtapHidError::Command)
+            }
             CtapHidCommand::Error => error(cid, CtapHidError::Command),
         }
+    }
+
+    fn authenticator_for(&mut self, cid: u32) -> &mut ctap2::Authenticator {
+        let store_dir = self.store_dir.clone();
+        let tpm_path = self.tpm_path.clone();
+        self.authenticators
+            .entry(cid)
+            .or_insert_with(|| ctap2::Authenticator::new(store_dir, tpm_path))
     }
 }
 
@@ -235,12 +281,11 @@ pub fn command_name(command: CtapHidCommand) -> &'static str {
     }
 }
 
-fn handle_init(cid: u32, payload: &[u8]) -> Response {
+fn handle_init(cid: u32, allocated_cid: u32, payload: &[u8]) -> Response {
     if payload.len() != 8 {
         return error(cid, CtapHidError::Length);
     }
 
-    let allocated_cid = if cid == BROADCAST_CID { 1 } else { cid };
     let mut response = Vec::with_capacity(17);
     response.extend_from_slice(payload);
     response.extend_from_slice(&allocated_cid.to_be_bytes());

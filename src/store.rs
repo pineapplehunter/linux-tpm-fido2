@@ -26,6 +26,7 @@ const HMAC_KEY_FILE: &str = "integrity.hmac-key";
 pub struct StoredCtap2Credential {
     pub id: Vec<u8>,
     pub rp_id: String,
+    pub discoverable: bool,
     pub user_id: Option<u32>,
     pub user_handle: Vec<u8>,
     pub user_name: Option<String>,
@@ -58,6 +59,14 @@ pub struct StoredTpmKey {
     pub public_key_x: Vec<u8>,
     pub public_key_y: Vec<u8>,
     pub auth_value: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredClientPinState {
+    pub pin_salt: Vec<u8>,
+    pub pin_verifier: Vec<u8>,
+    pub retries: u32,
+    pub integrity_mac: Option<Vec<u8>>,
 }
 
 pub fn dev_store_dir() -> PathBuf {
@@ -102,6 +111,23 @@ pub fn update_ctap2_sign_count_in_dir(
     ))
 }
 
+pub fn delete_ctap2_credential_from_dir(dir: impl AsRef<Path>, credential_id: &[u8]) -> Result<()> {
+    block_on_store(delete_ctap2_credential_async(dir.as_ref(), credential_id))
+}
+
+pub fn load_client_pin_state_from_dir(
+    dir: impl AsRef<Path>,
+) -> Result<Option<StoredClientPinState>> {
+    block_on_store(load_client_pin_state_async(dir.as_ref()))
+}
+
+pub fn save_client_pin_state_to_dir(
+    dir: impl AsRef<Path>,
+    state: &StoredClientPinState,
+) -> Result<()> {
+    block_on_store(save_client_pin_state_async(dir.as_ref(), state))
+}
+
 pub fn credentials_database_path_in_dir(dir: impl AsRef<Path>) -> PathBuf {
     dir.as_ref().join(CREDENTIALS_DATABASE_FILE)
 }
@@ -117,7 +143,7 @@ async fn load_ctap2_credentials_async(
 
     let pool = open_database(dir).await?;
     let rows = sqlx::query(
-        "SELECT m.credential_id, m.rp_id, m.user_id, m.user_handle, m.user_name, m.user_display_name, \
+        "SELECT m.credential_id, m.rp_id, m.discoverable, m.user_id, m.user_handle, m.user_name, m.user_display_name, \
                 m.sign_count, m.integrity_mac, \
                 p.policy_selection, p.policy_digest, \
                 p.tpm_private AS primary_tpm_private, p.tpm_public AS primary_tpm_public, \
@@ -163,6 +189,7 @@ async fn load_ctap2_credentials_async(
             let stored = StoredCtap2Credential {
                 id: row.try_get("credential_id")?,
                 rp_id: row.try_get("rp_id")?,
+                discoverable: row.try_get::<i64, _>("discoverable")? != 0,
                 user_id: match (stored_user_id, user_id) {
                     (Some(value), _) => Some(
                         u32::try_from(value)
@@ -230,7 +257,9 @@ async fn load_ctap2_credentials_async(
                     }
                 };
                 let computed = compute_credential_mac(&key, &stored)?;
-                if computed != expected_mac as &[u8] {
+                if computed != expected_mac as &[u8]
+                    && compute_credential_mac_legacy(&key, &stored)? != expected_mac as &[u8]
+                {
                     log::error!(
                         "credential integrity check failed for rp_id={} id={}",
                         stored.rp_id,
@@ -274,10 +303,11 @@ async fn save_ctap2_credentials_async(
 
         sqlx::query!(
             "INSERT INTO credential_metadata \
-             (credential_id, rp_id, user_id, user_handle, user_name, user_display_name, sign_count, integrity_mac) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             (credential_id, rp_id, discoverable, user_id, user_handle, user_name, user_display_name, sign_count, integrity_mac) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             &credential.id,
             &credential.rp_id,
+            i64::from(credential.discoverable),
             credential.user_id.map(i64::from),
             &credential.user_handle,
             credential.user_name.as_deref(),
@@ -371,6 +401,91 @@ async fn update_ctap2_sign_count_async(
     Ok(())
 }
 
+async fn delete_ctap2_credential_async(dir: &Path, credential_id: &[u8]) -> Result<()> {
+    let pool = open_database(dir).await?;
+    let result = sqlx::query!(
+        "DELETE FROM credential_metadata WHERE credential_id = ?1",
+        credential_id,
+    )
+    .execute(&pool)
+    .await
+    .wrap_err("deleting CTAP2 credential")?;
+    if result.rows_affected() != 1 {
+        return Err(eyre!(
+            "deleted {} rows for credential ID; expected 1",
+            result.rows_affected()
+        ));
+    }
+    Ok(())
+}
+
+async fn load_client_pin_state_async(dir: &Path) -> Result<Option<StoredClientPinState>> {
+    let database_path = credentials_database_path_in_dir(dir);
+    if !database_path.exists() {
+        return Ok(None);
+    }
+
+    let pool = open_database(dir).await?;
+    let Some(row) = sqlx::query(
+        "SELECT pin_salt, pin_verifier, retries, integrity_mac \
+         FROM client_pin_state WHERE state_id = 1",
+    )
+    .fetch_optional(&pool)
+    .await
+    .wrap_err_with(|| format!("loading clientPIN state from {}", database_path.display()))?
+    else {
+        return Ok(None);
+    };
+
+    let retries: i64 = row.try_get("retries")?;
+    let state = StoredClientPinState {
+        pin_salt: row.try_get("pin_salt")?,
+        pin_verifier: row.try_get("pin_verifier")?,
+        retries: u32::try_from(retries).wrap_err("invalid clientPIN retry count")?,
+        integrity_mac: row.try_get("integrity_mac")?,
+    };
+
+    if let Some(expected_mac) = &state.integrity_mac {
+        let key = load_or_generate_hmac_key(dir)?;
+        let computed = compute_client_pin_mac(&key, &state)?;
+        if !constant_time_equal(&computed, expected_mac) {
+            return Err(eyre!("clientPIN state integrity check failed"));
+        }
+    }
+
+    Ok(Some(state))
+}
+
+async fn save_client_pin_state_async(dir: &Path, state: &StoredClientPinState) -> Result<()> {
+    if state.pin_salt.len() != 32 || state.pin_verifier.len() != 32 || state.retries > 8 {
+        return Err(eyre!("invalid clientPIN state"));
+    }
+
+    let pool = open_database(dir).await?;
+    let key = load_or_generate_hmac_key(dir)?;
+    let integrity_mac = compute_client_pin_mac(&key, state)?;
+    sqlx::query(
+        "INSERT INTO client_pin_state \
+         (state_id, pin_salt, pin_verifier, retries, integrity_mac, updated_at) \
+         VALUES (1, ?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)\
+          ON CONFLICT(state_id) DO UPDATE SET \
+            pin_salt = excluded.pin_salt, \
+            pin_verifier = excluded.pin_verifier, \
+            retries = excluded.retries, \
+            integrity_mac = excluded.integrity_mac, \
+           updated_at = CURRENT_TIMESTAMP",
+    )
+    .bind(&state.pin_salt)
+    .bind(&state.pin_verifier)
+    .bind(i64::from(state.retries))
+    .bind(integrity_mac)
+    .execute(&pool)
+    .await
+    .wrap_err("saving clientPIN state")?;
+
+    Ok(())
+}
+
 async fn open_database(dir: &Path) -> Result<SqlitePool> {
     fs::create_dir_all(dir).wrap_err_with(|| format!("creating {}", dir.display()))?;
     let database_path = credentials_database_path_in_dir(dir);
@@ -429,6 +544,7 @@ fn compute_credential_mac(key: &[u8; 32], credential: &StoredCtap2Credential) ->
     mac.update(&credential.id);
     mac.update(&(credential.rp_id.len() as u64).to_be_bytes());
     mac.update(credential.rp_id.as_bytes());
+    mac.update(&[u8::from(credential.discoverable)]);
     mac.update(&(credential.user_handle.len() as u64).to_be_bytes());
     mac.update(&credential.user_handle);
     mac.update(&credential.user_id.unwrap_or(0).to_be_bytes());
@@ -442,6 +558,46 @@ fn compute_credential_mac(key: &[u8; 32], credential: &StoredCtap2Credential) ->
     mac.update(display_name.as_bytes());
 
     Ok(mac.finalize().into_bytes().to_vec())
+}
+
+fn compute_credential_mac_legacy(
+    key: &[u8; 32],
+    credential: &StoredCtap2Credential,
+) -> Result<Vec<u8>> {
+    let mut mac = HmacSha256::new_from_slice(key).wrap_err("creating HMAC-SHA256")?;
+    mac.update(&(credential.id.len() as u64).to_be_bytes());
+    mac.update(&credential.id);
+    mac.update(&(credential.rp_id.len() as u64).to_be_bytes());
+    mac.update(credential.rp_id.as_bytes());
+    mac.update(&(credential.user_handle.len() as u64).to_be_bytes());
+    mac.update(&credential.user_handle);
+    mac.update(&credential.user_id.unwrap_or(0).to_be_bytes());
+    let user_name = credential.user_name.as_deref().unwrap_or("");
+    mac.update(&(user_name.len() as u64).to_be_bytes());
+    mac.update(user_name.as_bytes());
+    let display_name = credential.user_display_name.as_deref().unwrap_or("");
+    mac.update(&(display_name.len() as u64).to_be_bytes());
+    mac.update(display_name.as_bytes());
+    Ok(mac.finalize().into_bytes().to_vec())
+}
+
+fn compute_client_pin_mac(key: &[u8; 32], state: &StoredClientPinState) -> Result<Vec<u8>> {
+    let mut mac = HmacSha256::new_from_slice(key).wrap_err("creating HMAC-SHA256")?;
+    mac.update(&(state.pin_salt.len() as u64).to_be_bytes());
+    mac.update(&state.pin_salt);
+    mac.update(&(state.pin_verifier.len() as u64).to_be_bytes());
+    mac.update(&state.pin_verifier);
+    mac.update(&state.retries.to_be_bytes());
+    Ok(mac.finalize().into_bytes().to_vec())
+}
+
+fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .fold(0u8, |difference, (left, right)| difference | (left ^ right))
+            == 0
 }
 
 fn block_on_store<T>(future: impl Future<Output = Result<T>>) -> Result<T> {
@@ -475,6 +631,7 @@ mod tests {
         let credentials = vec![StoredCtap2Credential {
             id: vec![1, 2, 3, 4],
             rp_id: "example.com".to_owned(),
+            discoverable: true,
             user_id: Some(1000),
             user_handle: vec![5, 6, 7, 8],
             user_name: Some("user".to_owned()),
@@ -528,6 +685,7 @@ mod tests {
         let first = StoredCtap2Credential {
             id: vec![1],
             rp_id: "first.example".to_owned(),
+            discoverable: true,
             user_id: Some(1000),
             user_handle: vec![1],
             user_name: None,
@@ -547,6 +705,7 @@ mod tests {
         let second = StoredCtap2Credential {
             id: vec![2],
             rp_id: "second.example".to_owned(),
+            discoverable: true,
             user_id: Some(1000),
             user_handle: vec![2],
             user_name: None,
@@ -625,6 +784,7 @@ mod tests {
         StoredCtap2Credential {
             id,
             rp_id: rp_id.to_owned(),
+            discoverable: true,
             user_id: Some(1000),
             user_handle: vec![1, 2, 3, 4],
             user_name: None,
