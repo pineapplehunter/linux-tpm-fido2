@@ -59,22 +59,22 @@ in
       path = [ cfg.package ];
 
       script = ''
-        linux-tpm-fido2 daemon --store-dir /var/lib/linux-tpm-fido2 --tpm-path "${cfg.tpmPath}" --uhid-path "${cfg.uhidPath}"
+        exec linux-tpm-fido2 daemon --store-dir /var/lib/linux-tpm-fido2 --tpm-path "${cfg.tpmPath}" --uhid-path "${cfg.uhidPath}"
       '';
 
       serviceConfig = {
-        Type = "simple";
-        StateDirectory = "linux-tpm-fido2";
-        StateDirectoryMode = "0700";
-        RuntimeDirectory = "linux-tpm-fido2";
-        RuntimeDirectoryMode = "0700";
+        NoNewPrivileges = true;
+        PrivateDevices = false;
+        PrivateTmp = true;
+        ProtectHome = true;
+        ProtectSystem = "strict";
         Restart = "on-failure";
         RestartSec = 2;
-        NoNewPrivileges = true;
-        ProtectSystem = "strict";
-        ProtectHome = true;
-        PrivateTmp = true;
-        PrivateDevices = false;
+        RuntimeDirectory = "linux-tpm-fido2";
+        RuntimeDirectoryMode = "0777";
+        StateDirectory = "linux-tpm-fido2";
+        StateDirectoryMode = "0700";
+        Type = "simple";
       };
     };
   };
