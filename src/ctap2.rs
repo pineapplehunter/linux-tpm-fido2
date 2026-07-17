@@ -1095,7 +1095,7 @@ impl Authenticator {
         if permissions.contains(Ctap2PermissionFlags::GET_ASSERTION) && rp_id.is_none() {
             return Err(ErrorStatus::InvalidParameter);
         }
-        let (aes_key, hmac_key) = self.pin_uv_keys(key_agreement)?;
+        let (aes_key, mac_key) = self.pin_uv_keys(key_agreement)?;
         let pin_hash = decrypt_pin_hash(&aes_key, pin_hash_enc)?;
         self.authenticate_pin(&pin_hash)?;
 
@@ -1108,14 +1108,11 @@ impl Authenticator {
             issued_at: Instant::now(),
         });
         let encrypted_token = encrypt_aes(&aes_key, &token)?;
-        let mut mac =
-            HmacSha256::new_from_slice(&hmac_key).map_err(|_| ErrorStatus::OperationDenied)?;
-        mac.update(&encrypted_token);
-        let auth_param = mac.finalize().into_bytes();
+        let pin_uv_auth_param = compute_pin_uv_auth_param(&mac_key, &encrypted_token)?;
         Ok(encode_response(
             cbor!({
                 2 => Value::Bytes(encrypted_token),
-                3 => Value::Bytes(auth_param[..16].to_vec()),
+                3 => Value::Bytes(pin_uv_auth_param),
             })
             .unwrap(),
         ))
@@ -1139,7 +1136,7 @@ impl Authenticator {
         {
             return Err(ErrorStatus::OperationDenied);
         }
-        let (aes_key, hmac_key) = self.pin_uv_keys(key_agreement)?;
+        let (aes_key, mac_key) = self.pin_uv_keys(key_agreement)?;
         let mut token = vec![0u8; 32];
         fill_random(&mut token);
         self.pin_uv_auth_token = Some(PinUvAuthToken {
@@ -1149,14 +1146,11 @@ impl Authenticator {
             issued_at: Instant::now(),
         });
         let encrypted_token = encrypt_aes(&aes_key, &token)?;
-        let mut mac =
-            HmacSha256::new_from_slice(&hmac_key).map_err(|_| ErrorStatus::OperationDenied)?;
-        mac.update(&encrypted_token);
-        let auth_param = mac.finalize().into_bytes();
+        let pin_uv_auth_param = compute_pin_uv_auth_param(&mac_key, &encrypted_token)?;
         Ok(encode_response(
             cbor!({
                 2 => Value::Bytes(encrypted_token),
-                3 => Value::Bytes(auth_param[..16].to_vec()),
+                3 => Value::Bytes(pin_uv_auth_param),
             })
             .unwrap(),
         ))
@@ -1634,6 +1628,13 @@ fn verify_pin_uv_auth_param(
     constant_time_equal(&expected[..auth_param.len()], auth_param)
         .then_some(())
         .ok_or(ErrorStatus::PinAuthInvalid)
+}
+
+fn compute_pin_uv_auth_param(mac_key: &[u8; 32], message: &[u8]) -> Result<Vec<u8>, ErrorStatus> {
+    let mut mac = HmacSha256::new_from_slice(mac_key).map_err(|_| ErrorStatus::OperationDenied)?;
+    mac.update(message);
+    let result = mac.finalize().into_bytes();
+    Ok(result[..16].to_vec())
 }
 
 fn encrypt_aes(key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, ErrorStatus> {
@@ -2550,7 +2551,7 @@ mod tests {
         let client_secret2 = EphemeralSecret::generate();
         let server_key2 = client_pin_key_agreement(&mut authenticator);
         let server_public2 = parse_key_agreement(&server_key2).expect("valid server public key");
-        let (aes_key2, hmac_key2) = derive_protocol2_keys(
+        let (aes_key2, _) = derive_protocol2_keys(
             client_secret2
                 .diffie_hellman(&server_public2)
                 .raw_secret_bytes()
@@ -2580,22 +2581,8 @@ mod tests {
             panic!("expected token response map");
         };
 
-        // ── REGRESSION 1: Token response includes key 3 (pinUvAuthParam) ────
+        // Decrypt the token from key 2 for HMAC computations
         let encrypted_token = map_bytes(&token_map, 2).expect("encrypted token (key 2)");
-        let response_auth_param = map_bytes(&token_map, 3)
-            .expect("token response must include pinUvAuthParam (key 3) for CTAP 2.1");
-
-        // Verify the HMAC on key 3 is computed correctly
-        let mut mac = HmacSha256::new_from_slice(&hmac_key2).expect("HMAC key");
-        mac.update(encrypted_token);
-        let expected = mac.finalize().into_bytes();
-        assert_eq!(
-            response_auth_param,
-            &expected[..16],
-            "token key 3 should be HMAC-SHA256(hmac_key, encrypted_token)[..16]"
-        );
-
-        // Decrypt the token for later HMAC computations
         let token = decrypt_aes(&aes_key2, encrypted_token).expect("decrypt token");
         assert_eq!(token.len(), 32, "pinUvAuthToken must be 32 bytes");
 

@@ -7,6 +7,7 @@
 - TPM signing, credential registration/assertion, persistent credential storage, and recovery-slot generation are implemented.
 - GUI is not planned.
 - CTAP2 credential storage records a `user_id` and the daemon prefers `SUDO_UID` when running under sudo so credentials can be scoped to the connected user.
+- CTAP2 / Client-to-Authenticator spec reference (FIDO Proposed Standard, July 2025): https://fidoalliance.org/specs/fido-v2.2-ps-20250714/fido-client-to-authenticator-protocol-v2.2-ps-20250714.html
 - CTAP2 request handling accepts `credProps` and `residentKey` browser request shapes.
 - CTAP2 makeCredential also accepts the attestation conveyance preference shape.
 - Approval prompts now include peer process PID, UID, and GID in addition to session identity.
@@ -74,6 +75,24 @@ Relevant types in `src/ctap2.rs`:
     thread, then sends the actual TPM work to the daemon thread.
   - Falls back to the old direct-TPM-open path when no channel is available
     (e.g. during unit tests).
+
+### PinUvAuthProtocol 2 token response (getPinUvAuthToken / getPinUvAuthTokenUsingUv)
+
+Per CTAP 2.2 §6.5.7, the `getPinUvAuthToken` and `getPinUvAuthTokenUsingUv`
+responses MUST contain key 2 (encrypted token) **and** key 3
+(`pinUvAuthParam` = HMAC-SHA256(mac_key, encrypted_token)[0..16]).  Key 3 was
+temporarily removed during a debugging session because Chrome appeared to
+disconnect on the larger (71-byte) response, but that was not caused by key 3
+itself — it is now re-added in `src/ctap2.rs` via
+`compute_pin_uv_auth_param`.
+
+`derive_protocol2_keys` uses info strings `b"CTAP2 AES key"` and
+`b"CTAP2 HMAC key"` with a 32-byte zero salt — NO trailing null byte
+(confirmed against CTAP 2.2 spec and the companion Python reference impl).
+
+makeCredential `pinUvAuthParam` HMAC message = `clientDataHash || rpId` and the
+token must be scoped to `Some(rp_id)`; getAssertion message = `clientDataHash`.
+Regression test: `make_credential_with_pin_uv_auth_token_regression`.
 
 ### Debug logging in TPM operations
 
