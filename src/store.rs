@@ -334,9 +334,11 @@ async fn save_default_pcr_policy_async(dir: &Path, indices: &[u32]) -> Result<()
     Ok(())
 }
 
+type DaemonPassphraseData = (Vec<u8>, Vec<u8>, RecoveryKdf);
+
 pub fn load_daemon_passphrase_from_dir(
     dir: impl AsRef<Path>,
-) -> Result<Option<(Vec<u8>, Vec<u8>, RecoveryKdf)>> {
+) -> Result<Option<DaemonPassphraseData>> {
     block_on_store(load_daemon_passphrase_async(dir.as_ref()))
 }
 
@@ -351,7 +353,7 @@ pub fn save_daemon_passphrase_to_dir(
 
 async fn load_daemon_passphrase_async(
     dir: &Path,
-) -> Result<Option<(Vec<u8>, Vec<u8>, RecoveryKdf)>> {
+) -> Result<Option<DaemonPassphraseData>> {
     let pool = open_database(dir).await?;
     let row = sqlx::query("SELECT value FROM daemon_config WHERE key = 'daemon_passphrase'")
         .fetch_optional(&pool)

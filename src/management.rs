@@ -103,17 +103,61 @@ fn filter_uid(uid: u32) -> Option<u32> {
     if uid == 0 { None } else { Some(uid) }
 }
 
-fn handle_list_credentials(store_dir: &Path, peer_uid: u32) -> ManagementResponse {
+fn pcr_indices_from_selection(selection: &str) -> Option<Vec<u32>> {
+    let (_, indices_str) = selection.split_once(':')?;
+    indices_str
+        .split(',')
+        .map(|s| s.trim().parse::<u32>().ok())
+        .collect::<Option<Vec<_>>>()
+}
+
+fn check_pcr_stale(
+    tpm_cmd_tx: Option<&ctap2::TpmCmdSender>,
+    policy: &store::StoredPcrPolicy,
+) -> Option<bool> {
+    let pcr_indices = pcr_indices_from_selection(&policy.selection)?;
+    let tx = tpm_cmd_tx?;
+    let (digest_tx, digest_rx) = mpsc::channel();
+    let cmd = ctap2::TpmCommand::PcrDigestCheck(ctap2::PcrDigestCheckCommand {
+        pcr_indices,
+        resp_tx: digest_tx,
+    });
+    let (resp_tx, resp_rx) = mpsc::channel();
+    if tx.send((cmd, resp_tx)).is_err() {
+        return None;
+    }
+    // Wait for the TPM command to complete.
+    if resp_rx.recv().ok()?.is_err() {
+        return None;
+    }
+    // Retrieve the current digest.
+    let current_digest = digest_rx.recv().ok()?;
+    match current_digest {
+        Ok(d) => Some(d != policy.digest),
+        Err(_) => None,
+    }
+}
+
+fn handle_list_credentials(
+    store_dir: &Path,
+    tpm_cmd_tx: Option<&ctap2::TpmCmdSender>,
+    peer_uid: u32,
+) -> ManagementResponse {
     match store::load_ctap2_credentials_from_dir(store_dir, filter_uid(peer_uid)) {
         Ok(credentials) => {
             let creds: Vec<ciborium::value::Value> = credentials
                 .iter()
                 .map(|c| {
+                    let pcr_stale = c
+                        .policy
+                        .as_ref()
+                        .and_then(|p| check_pcr_stale(tpm_cmd_tx, p));
                     cbor!({
                         "id" => hex::encode(&c.id),
                         "rp_id" => c.rp_id.as_str(),
                         "user_name" => c.user_name.as_deref().unwrap_or(""),
                         "discoverable" => c.discoverable,
+                        "pcr_stale" => pcr_stale,
                     })
                     .unwrap()
                 })
@@ -722,7 +766,9 @@ fn dispatch(
     request: &ManagementRequest,
 ) -> ManagementResponse {
     match request {
-        ManagementRequest::ListCredentials => handle_list_credentials(store_dir, peer_uid),
+        ManagementRequest::ListCredentials => {
+            handle_list_credentials(store_dir, tpm_cmd_tx, peer_uid)
+        }
         ManagementRequest::UpdatePassphrase {
             old_passphrase,
             new_passphrase,

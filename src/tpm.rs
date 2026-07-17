@@ -806,7 +806,7 @@ impl Tpm {
         })
     }
 
-    fn current_pcr_digest(&mut self, selection_list: &PcrSelectionList) -> Result<Vec<u8>> {
+    pub fn current_pcr_digest(&mut self, selection_list: &PcrSelectionList) -> Result<Vec<u8>> {
         let (_, _, digest_list): (u32, PcrSelectionList, DigestList) =
             self.context.pcr_read(selection_list.clone())?;
         let mut hasher = Sha256::new();
@@ -918,13 +918,20 @@ fn signing_key_public(policy: Option<&PcrPolicyBinding>, user_with_auth: bool) -
         .wrap_err("building TPM ECC signing-key template")
 }
 
-fn default_pcr_selection(pcr_indices: Option<&[u32]>) -> Result<(PcrSelectionList, String)> {
-    let indices = pcr_indices.unwrap_or(&[7]);
-    let slots: Result<Vec<PcrSlot>> = indices
+pub fn pcr_selection_for_indices(pcr_indices: &[u32]) -> Result<PcrSelectionList> {
+    let slots: Result<Vec<PcrSlot>> = pcr_indices
         .iter()
         .map(|&i| PcrSlot::try_from(1u32 << i).map_err(|_| eyre!("invalid PCR index {}", i)))
         .collect();
     let slots = slots?;
+    PcrSelectionListBuilder::new()
+        .with_selection(HashingAlgorithm::Sha256, &slots)
+        .build()
+        .wrap_err("building PCR selection list")
+}
+
+fn default_pcr_selection(pcr_indices: Option<&[u32]>) -> Result<(PcrSelectionList, String)> {
+    let indices = pcr_indices.unwrap_or(&[7]);
     let name = format!(
         "sha256:{}",
         indices
@@ -933,10 +940,7 @@ fn default_pcr_selection(pcr_indices: Option<&[u32]>) -> Result<(PcrSelectionLis
             .collect::<Vec<_>>()
             .join(",")
     );
-    let selection = PcrSelectionListBuilder::new()
-        .with_selection(HashingAlgorithm::Sha256, &slots)
-        .build()
-        .wrap_err("building PCR selection list")?;
+    let selection = pcr_selection_for_indices(indices)?;
     Ok((selection, name))
 }
 

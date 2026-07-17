@@ -1412,6 +1412,18 @@ impl Authenticator {
                 );
                 Ok(())
             }
+            TpmCommand::PcrDigestCheck(cmd) => {
+                let selection = tpm::pcr_selection_for_indices(&cmd.pcr_indices)
+                    .wrap_err("building PCR selection from indices")?;
+                let tpm = self
+                    .ensure_tpm()
+                    .ok_or_else(|| color_eyre::eyre::eyre!("TPM not available"))?;
+                let digest = tpm
+                    .current_pcr_digest(&selection)
+                    .wrap_err("reading current PCR digest")?;
+                let _ = cmd.resp_tx.send(Ok(digest));
+                Ok(())
+            }
         }
     }
 }
@@ -1426,6 +1438,7 @@ impl Default for Authenticator {
 pub enum TpmCommand {
     PcrPolicyUpdate(PcrPolicyUpdateCommand),
     PassphraseChange(PassphraseChangeCommand),
+    PcrDigestCheck(PcrDigestCheckCommand),
 }
 
 /// Data needed to update a credential's PCR policy via `policy_authorize`.
@@ -1443,6 +1456,12 @@ pub struct PassphraseChangeCommand {
     pub new_passphrase_hash: Vec<u8>,
     pub new_salt: Vec<u8>,
     pub new_kdf: tpm::RecoveryKdf,
+}
+
+/// Data needed to check the current PCR digest for a given selection.
+pub struct PcrDigestCheckCommand {
+    pub pcr_indices: Vec<u32>,
+    pub resp_tx: mpsc::Sender<color_eyre::Result<Vec<u8>>>,
 }
 
 /// Result type for a TPM command sent across threads.
@@ -1690,13 +1709,13 @@ fn supports_es256(value: &Value) -> bool {
 }
 
 fn validate_make_credential_options(options: Option<&[(Value, Value)]>) -> Result<(), ErrorStatus> {
-    validate_common_options(options, true)?;
+    validate_common_options(options, false)?;
     validate_resident_key_options(options)?;
     Ok(())
 }
 
 fn validate_get_assertion_options(options: Option<&[(Value, Value)]>) -> Result<(), ErrorStatus> {
-    validate_common_options(options, true)
+    validate_common_options(options, false)
 }
 
 fn validate_credential_descriptor_list(list: Option<&[Value]>) -> Result<(), ErrorStatus> {
@@ -2612,6 +2631,8 @@ mod tests {
 
     #[test]
     fn get_assertion_options_accept_absent_and_up_true() {
+        // Regression: webauthn.io sends authenticatorGetAssertion with up=false
+        // (no uv=true), which was rejected as UnsupportedOption.
         assert_eq!(validate_get_assertion_options(None), Ok(()));
         assert_eq!(
             validate_get_assertion_options(Some(&options_map(&[("up", true)]))),
@@ -2619,7 +2640,7 @@ mod tests {
         );
         assert_eq!(
             validate_get_assertion_options(Some(&options_map(&[("up", false)]))),
-            Err(ErrorStatus::UnsupportedOption)
+            Ok(())
         );
     }
 
@@ -2636,21 +2657,30 @@ mod tests {
     }
 
     #[test]
-    fn options_reject_disabled_user_presence_without_uv() {
-        assert_eq!(
-            validate_make_credential_options(Some(&options_map(&[("up", false)]))),
-            Err(ErrorStatus::UnsupportedOption)
-        );
-    }
-
-    #[test]
     fn options_accept_disabled_user_presence_with_uv() {
+        // Some sites (e.g. github.com) send up=false alongside uv=true on
+        // makeCredential; this combination must also be accepted.
         assert_eq!(
             validate_make_credential_options(Some(&options_map(&[("up", false), ("uv", true)]))),
             Ok(())
         );
         assert_eq!(
             validate_get_assertion_options(Some(&options_map(&[("up", false), ("uv", true)]))),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn options_accept_disabled_user_presence_without_uv() {
+        // Regression: webauthn.io sends authenticatorMakeCredential and
+        // authenticatorGetAssertion with up=false but no uv=true.  Both
+        // were rejected as UnsupportedOption.
+        assert_eq!(
+            validate_make_credential_options(Some(&options_map(&[("up", false)]))),
+            Ok(())
+        );
+        assert_eq!(
+            validate_get_assertion_options(Some(&options_map(&[("up", false)]))),
             Ok(())
         );
     }
