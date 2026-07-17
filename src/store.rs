@@ -232,31 +232,43 @@ pub fn credentials_database_path_in_dir(dir: impl AsRef<Path>) -> PathBuf {
     dir.as_ref().join(CREDENTIALS_DATABASE_FILE)
 }
 
-const DEFAULT_PCR_POLICY_FILE: &str = "default-pcr-policy.json";
-
-pub fn default_pcr_policy_path(dir: impl AsRef<Path>) -> PathBuf {
-    dir.as_ref().join(DEFAULT_PCR_POLICY_FILE)
+pub fn load_default_pcr_policy(dir: impl AsRef<Path>) -> Result<Option<Vec<u32>>> {
+    block_on_store(load_default_pcr_policy_async(dir.as_ref()))
 }
 
-pub fn load_default_pcr_policy(dir: impl AsRef<Path>) -> Result<Option<Vec<u32>>> {
-    let path = default_pcr_policy_path(dir);
-    if !path.exists() {
-        return Ok(None);
+async fn load_default_pcr_policy_async(dir: &Path) -> Result<Option<Vec<u32>>> {
+    let pool = open_database(dir).await?;
+    let row = sqlx::query("SELECT value FROM daemon_config WHERE key = 'default_pcr_policy'")
+        .fetch_optional(&pool)
+        .await
+        .wrap_err("loading default PCR policy from database")?;
+
+    match row {
+        Some(r) => {
+            let blob: Vec<u8> = r.get("value");
+            let indices: Vec<u32> = ciborium::from_reader(&blob[..])
+                .wrap_err("deserializing default PCR policy from database")?;
+            Ok(Some(indices))
+        }
+        None => Ok(None),
     }
-    let data = fs::read_to_string(&path)
-        .wrap_err_with(|| format!("reading default PCR policy from {}", path.display()))?;
-    let indices: Vec<u32> = serde_json::from_str(&data)
-        .wrap_err_with(|| format!("parsing default PCR policy from {}", path.display()))?;
-    Ok(Some(indices))
 }
 
 pub fn save_default_pcr_policy(dir: impl AsRef<Path>, indices: &[u32]) -> Result<()> {
-    let path = default_pcr_policy_path(&dir);
-    fs::create_dir_all(dir.as_ref())
-        .wrap_err_with(|| format!("creating store directory {}", dir.as_ref().display()))?;
-    let data = serde_json::to_string(indices).wrap_err("serializing default PCR policy")?;
-    fs::write(&path, data)
-        .wrap_err_with(|| format!("writing default PCR policy to {}", path.display()))?;
+    block_on_store(save_default_pcr_policy_async(dir.as_ref(), indices))
+}
+
+async fn save_default_pcr_policy_async(dir: &Path, indices: &[u32]) -> Result<()> {
+    let pool = open_database(dir).await?;
+    let mut blob = Vec::new();
+    ciborium::into_writer(indices, &mut blob).wrap_err("serializing default PCR policy")?;
+    sqlx::query(
+        "INSERT OR REPLACE INTO daemon_config (key, value, updated_at) VALUES ('default_pcr_policy', ?, datetime('now'))",
+    )
+    .bind(blob)
+    .execute(&pool)
+    .await
+    .wrap_err("saving default PCR policy to database")?;
     Ok(())
 }
 

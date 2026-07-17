@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 
+use ciborium::cbor;
 use color_eyre::Result;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
@@ -52,7 +53,7 @@ pub struct ManagementResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub result: Option<serde_json::Value>,
+    pub result: Option<ciborium::value::Value>,
 }
 
 fn recv_message(stream: &mut UnixStream) -> Result<Vec<u8>> {
@@ -75,21 +76,22 @@ fn send_message(stream: &mut UnixStream, data: &[u8]) -> Result<()> {
 fn handle_list_credentials(store_dir: &Path, _tpm_path: &Path) -> ManagementResponse {
     match store::load_ctap2_credentials_from_dir(store_dir, None) {
         Ok(credentials) => {
-            let creds: Vec<serde_json::Value> = credentials
+            let creds: Vec<ciborium::value::Value> = credentials
                 .iter()
                 .map(|c| {
-                    serde_json::json!({
-                        "id": hex::encode(&c.id),
-                        "rp_id": c.rp_id,
-                        "user_name": c.user_name,
-                        "discoverable": c.discoverable,
+                    cbor!({
+                        "id" => hex::encode(&c.id),
+                        "rp_id" => c.rp_id.as_str(),
+                        "user_name" => c.user_name.as_deref().unwrap_or(""),
+                        "discoverable" => c.discoverable,
                     })
+                    .unwrap()
                 })
                 .collect();
             ManagementResponse {
                 ok: true,
                 error: None,
-                result: Some(serde_json::json!({ "credentials": creds })),
+                result: Some(cbor!({ "credentials" => creds }).unwrap()),
             }
         }
         Err(e) => ManagementResponse {
@@ -123,11 +125,14 @@ fn handle_update_passphrase(
         let recovery = match credential.recovery.as_ref() {
             Some(r) => r,
             None => {
-                results.push(serde_json::json!({
-                    "credential": id_hex,
-                    "status": "skipped",
-                    "reason": "no recovery slot"
-                }));
+                results.push(
+                    cbor!({
+                        "credential" => id_hex,
+                        "status" => "skipped",
+                        "reason" => "no recovery slot",
+                    })
+                    .unwrap(),
+                );
                 continue;
             }
         };
@@ -140,21 +145,27 @@ fn handle_update_passphrase(
         ) {
             Ok(h) => h,
             Err(e) => {
-                results.push(serde_json::json!({
-                    "credential": id_hex,
-                    "status": "error",
-                    "error": format!("passphrase validation error: {e}")
-                }));
+                results.push(
+                    cbor!({
+                        "credential" => id_hex,
+                        "status" => "error",
+                        "error" => format!("passphrase validation error: {e}"),
+                    })
+                    .unwrap(),
+                );
                 continue;
             }
         };
         if old_hash != recovery.passphrase_hash {
             old_hash.zeroize();
-            results.push(serde_json::json!({
-                "credential": id_hex,
-                "status": "error",
-                "error": "recovery passphrase does not match"
-            }));
+            results.push(
+                cbor!({
+                    "credential" => id_hex,
+                    "status" => "error",
+                    "error" => "recovery passphrase does not match",
+                })
+                .unwrap(),
+            );
             continue;
         }
         old_hash.zeroize();
@@ -162,11 +173,14 @@ fn handle_update_passphrase(
         // Generate new salt and hash (no TPM needed).
         let mut new_salt = vec![0u8; 32];
         if getrandom::fill(&mut new_salt).is_err() {
-            results.push(serde_json::json!({
-                "credential": id_hex,
-                "status": "error",
-                "error": "failed to generate random salt"
-            }));
+            results.push(
+                cbor!({
+                    "credential" => id_hex,
+                    "status" => "error",
+                    "error" => "failed to generate random salt",
+                })
+                .unwrap(),
+            );
             continue;
         }
         let new_kdf = tpm::RecoveryKdf::argon2id_default();
@@ -174,11 +188,14 @@ fn handle_update_passphrase(
             Ok(h) => h,
             Err(e) => {
                 new_salt.zeroize();
-                results.push(serde_json::json!({
-                    "credential": id_hex,
-                    "status": "error",
-                    "error": format!("new passphrase hash error: {e}")
-                }));
+                results.push(
+                    cbor!({
+                        "credential" => id_hex,
+                        "status" => "error",
+                        "error" => format!("new passphrase hash error: {e}"),
+                    })
+                    .unwrap(),
+                );
                 continue;
             }
         };
@@ -224,18 +241,24 @@ fn handle_update_passphrase(
         new_salt.zeroize();
         match cmd_result {
             Ok(()) => {
-                results.push(serde_json::json!({
-                    "credential": id_hex,
-                    "status": "ok"
-                }));
+                results.push(
+                    cbor!({
+                        "credential" => id_hex,
+                        "status" => "ok",
+                    })
+                    .unwrap(),
+                );
             }
             Err(e) => {
                 log::warn!("failed to change passphrase for {id_hex}: {e}");
-                results.push(serde_json::json!({
-                    "credential": id_hex,
-                    "status": "error",
-                    "error": format!("{e}")
-                }));
+                results.push(
+                    cbor!({
+                        "credential" => id_hex,
+                        "status" => "error",
+                        "error" => format!("{e}"),
+                    })
+                    .unwrap(),
+                );
             }
         }
     }
@@ -243,7 +266,7 @@ fn handle_update_passphrase(
     ManagementResponse {
         ok: true,
         error: None,
-        result: Some(serde_json::json!({ "results": results })),
+        result: Some(cbor!({ "results" => results }).unwrap()),
     }
 }
 
@@ -269,44 +292,56 @@ fn handle_update_pcr_reference(
         let policy = match credential.policy.as_ref() {
             Some(p) => p,
             None => {
-                results.push(serde_json::json!({
-                    "credential": id_hex,
-                    "status": "skipped",
-                    "reason": "no PCR policy"
-                }));
+                results.push(
+                    cbor!({
+                        "credential" => id_hex,
+                        "status" => "skipped",
+                        "reason" => "no PCR policy",
+                    })
+                    .unwrap(),
+                );
                 continue;
             }
         };
         let recovery = match credential.recovery.as_ref() {
             Some(r) => r,
             None => {
-                results.push(serde_json::json!({
-                    "credential": id_hex,
-                    "status": "skipped",
-                    "reason": "no recovery slot"
-                }));
+                results.push(
+                    cbor!({
+                        "credential" => id_hex,
+                        "status" => "skipped",
+                        "reason" => "no recovery slot",
+                    })
+                    .unwrap(),
+                );
                 continue;
             }
         };
         let policy_ref = match policy.policy_ref.as_ref() {
             Some(r) => r.clone(),
             None => {
-                results.push(serde_json::json!({
-                    "credential": id_hex,
-                    "status": "error",
-                    "error": "credential has no policyRef"
-                }));
+                results.push(
+                    cbor!({
+                        "credential" => id_hex,
+                        "status" => "error",
+                        "error" => "credential has no policyRef",
+                    })
+                    .unwrap(),
+                );
                 continue;
             }
         };
         let authority_name = match policy.authority_name.as_ref() {
             Some(n) => n.clone(),
             None => {
-                results.push(serde_json::json!({
-                    "credential": id_hex,
-                    "status": "error",
-                    "error": "credential has no authority name"
-                }));
+                results.push(
+                    cbor!({
+                        "credential" => id_hex,
+                        "status" => "error",
+                        "error" => "credential has no authority name",
+                    })
+                    .unwrap(),
+                );
                 continue;
             }
         };
@@ -317,20 +352,26 @@ fn handle_update_pcr_reference(
         match passphrase_result {
             Ok(hash) => {
                 if hash != recovery.passphrase_hash {
-                    results.push(serde_json::json!({
-                        "credential": id_hex,
-                        "status": "error",
-                        "error": "recovery passphrase does not match"
-                    }));
+                    results.push(
+                        cbor!({
+                            "credential" => id_hex,
+                            "status" => "error",
+                            "error" => "recovery passphrase does not match",
+                        })
+                        .unwrap(),
+                    );
                     continue;
                 }
             }
             Err(e) => {
-                results.push(serde_json::json!({
-                    "credential": id_hex,
-                    "status": "error",
-                    "error": format!("passphrase validation error: {e}")
-                }));
+                results.push(
+                    cbor!({
+                        "credential" => id_hex,
+                        "status" => "error",
+                        "error" => format!("passphrase validation error: {e}"),
+                    })
+                    .unwrap(),
+                );
                 continue;
             }
         }
@@ -368,18 +409,24 @@ fn handle_update_pcr_reference(
 
         match cmd_result {
             Ok(()) => {
-                results.push(serde_json::json!({
-                    "credential": id_hex,
-                    "status": "ok"
-                }));
+                results.push(
+                    cbor!({
+                        "credential" => id_hex,
+                        "status" => "ok",
+                    })
+                    .unwrap(),
+                );
             }
             Err(e) => {
                 log::warn!("failed to update PCR policy for {id_hex}: {e}");
-                results.push(serde_json::json!({
-                    "credential": id_hex,
-                    "status": "error",
-                    "error": format!("{e}")
-                }));
+                results.push(
+                    cbor!({
+                        "credential" => id_hex,
+                        "status" => "error",
+                        "error" => format!("{e}"),
+                    })
+                    .unwrap(),
+                );
             }
         }
     }
@@ -387,7 +434,7 @@ fn handle_update_pcr_reference(
     ManagementResponse {
         ok: true,
         error: None,
-        result: Some(serde_json::json!({ "results": results })),
+        result: Some(cbor!({ "results" => results }).unwrap()),
     }
 }
 
@@ -443,11 +490,14 @@ fn handle_update_pcr_policy(
         let credential = match credentials.iter().find(|c| c.id == *id) {
             Some(c) => c,
             None => {
-                results.push(serde_json::json!({
-                    "credential": id_hex,
-                    "status": "skipped",
-                    "reason": "credential not found"
-                }));
+                results.push(
+                    cbor!({
+                        "credential" => id_hex,
+                        "status" => "skipped",
+                        "reason" => "credential not found",
+                    })
+                    .unwrap(),
+                );
                 continue;
             }
         };
@@ -455,44 +505,56 @@ fn handle_update_pcr_policy(
         let policy = match credential.policy.as_ref() {
             Some(p) => p,
             None => {
-                results.push(serde_json::json!({
-                    "credential": id_hex,
-                    "status": "skipped",
-                    "reason": "no PCR policy"
-                }));
+                results.push(
+                    cbor!({
+                        "credential" => id_hex,
+                        "status" => "skipped",
+                        "reason" => "no PCR policy",
+                    })
+                    .unwrap(),
+                );
                 continue;
             }
         };
         let recovery = match credential.recovery.as_ref() {
             Some(r) => r,
             None => {
-                results.push(serde_json::json!({
-                    "credential": id_hex,
-                    "status": "skipped",
-                    "reason": "no recovery slot"
-                }));
+                results.push(
+                    cbor!({
+                        "credential" => id_hex,
+                        "status" => "skipped",
+                        "reason" => "no recovery slot",
+                    })
+                    .unwrap(),
+                );
                 continue;
             }
         };
         let policy_ref = match policy.policy_ref.as_ref() {
             Some(r) => r.clone(),
             None => {
-                results.push(serde_json::json!({
-                    "credential": id_hex,
-                    "status": "error",
-                    "error": "credential has no policyRef"
-                }));
+                results.push(
+                    cbor!({
+                        "credential" => id_hex,
+                        "status" => "error",
+                        "error" => "credential has no policyRef",
+                    })
+                    .unwrap(),
+                );
                 continue;
             }
         };
         let authority_name = match policy.authority_name.as_ref() {
             Some(n) => n.clone(),
             None => {
-                results.push(serde_json::json!({
-                    "credential": id_hex,
-                    "status": "error",
-                    "error": "credential has no authority name"
-                }));
+                results.push(
+                    cbor!({
+                        "credential" => id_hex,
+                        "status" => "error",
+                        "error" => "credential has no authority name",
+                    })
+                    .unwrap(),
+                );
                 continue;
             }
         };
@@ -505,22 +567,28 @@ fn handle_update_pcr_policy(
         ) {
             Ok(h) => h,
             Err(e) => {
-                results.push(serde_json::json!({
-                    "credential": id_hex,
-                    "status": "error",
-                    "error": format!("passphrase validation error: {e}")
-                }));
+                results.push(
+                    cbor!({
+                        "credential" => id_hex,
+                        "status" => "error",
+                        "error" => format!("passphrase validation error: {e}"),
+                    })
+                    .unwrap(),
+                );
                 continue;
             }
         };
         let passphrase_ok = passphrase_hash == recovery.passphrase_hash;
         passphrase_hash.zeroize();
         if !passphrase_ok {
-            results.push(serde_json::json!({
-                "credential": id_hex,
-                "status": "error",
-                "error": "recovery passphrase does not match"
-            }));
+            results.push(
+                cbor!({
+                    "credential" => id_hex,
+                    "status" => "error",
+                    "error" => "recovery passphrase does not match",
+                })
+                .unwrap(),
+            );
             continue;
         }
 
@@ -562,18 +630,24 @@ fn handle_update_pcr_policy(
 
         match cmd_result {
             Ok(()) => {
-                results.push(serde_json::json!({
-                    "credential": id_hex,
-                    "status": "ok"
-                }));
+                results.push(
+                    cbor!({
+                        "credential" => id_hex,
+                        "status" => "ok",
+                    })
+                    .unwrap(),
+                );
             }
             Err(e) => {
                 log::warn!("failed to update PCR policy for {id_hex}: {e}");
-                results.push(serde_json::json!({
-                    "credential": id_hex,
-                    "status": "error",
-                    "error": format!("{e}")
-                }));
+                results.push(
+                    cbor!({
+                        "credential" => id_hex,
+                        "status" => "error",
+                        "error" => format!("{e}"),
+                    })
+                    .unwrap(),
+                );
             }
         }
     }
@@ -581,7 +655,7 @@ fn handle_update_pcr_policy(
     ManagementResponse {
         ok: true,
         error: None,
-        result: Some(serde_json::json!({ "results": results })),
+        result: Some(cbor!({ "results" => results }).unwrap()),
     }
 }
 
@@ -590,7 +664,7 @@ fn handle_set_default_pcr_policy(store_dir: &Path, pcr_indices: &[u32]) -> Manag
         Ok(()) => ManagementResponse {
             ok: true,
             error: None,
-            result: Some(serde_json::json!({ "pcr_indices": pcr_indices })),
+            result: Some(cbor!({ "pcr_indices" => pcr_indices }).unwrap()),
         },
         Err(e) => ManagementResponse {
             ok: false,
@@ -644,7 +718,7 @@ fn handle_client(
         }
     };
 
-    let request: ManagementRequest = match serde_json::from_slice(&data) {
+    let request: ManagementRequest = match ciborium::from_reader(&data[..]) {
         Ok(r) => r,
         Err(e) => {
             let resp = ManagementResponse {
@@ -652,7 +726,8 @@ fn handle_client(
                 error: Some(format!("invalid request: {e}")),
                 result: None,
             };
-            if let Ok(encoded) = serde_json::to_vec(&resp) {
+            let mut encoded = Vec::new();
+            if ciborium::into_writer(&resp, &mut encoded).is_ok() {
                 let _ = send_message(&mut stream, &encoded);
             }
             return;
@@ -660,13 +735,11 @@ fn handle_client(
     };
 
     let response = dispatch(&store_dir, tpm_cmd_tx.as_ref(), &request);
-    let encoded = match serde_json::to_vec(&response) {
-        Ok(e) => e,
-        Err(e) => {
-            log::warn!("management: failed to encode response: {e}");
-            return;
-        }
-    };
+    let mut encoded = Vec::new();
+    if let Err(e) = ciborium::into_writer(&response, &mut encoded) {
+        log::warn!("management: failed to encode response: {e}");
+        return;
+    }
     if let Err(e) = send_message(&mut stream, &encoded) {
         log::warn!("management: failed to send response: {e}");
     }
@@ -721,6 +794,17 @@ pub fn serve(
     Ok(())
 }
 
+pub fn value_get<'a>(
+    value: &'a ciborium::value::Value,
+    key: &str,
+) -> Option<&'a ciborium::value::Value> {
+    value.as_map().and_then(|map| {
+        map.iter()
+            .find(|(k, _)| k.as_text() == Some(key))
+            .map(|(_, v)| v)
+    })
+}
+
 pub fn send_request(request: &ManagementRequest) -> Result<ManagementResponse> {
     let socket_path = management_socket_path();
 
@@ -730,7 +814,8 @@ pub fn send_request(request: &ManagementRequest) -> Result<ManagementResponse> {
         )
     })?;
 
-    let encoded = serde_json::to_vec(request)
+    let mut encoded = Vec::new();
+    ciborium::into_writer(request, &mut encoded)
         .map_err(|e| color_eyre::eyre::eyre!("encoding request: {e}"))?;
 
     send_message(&mut stream, &encoded)
@@ -739,7 +824,7 @@ pub fn send_request(request: &ManagementRequest) -> Result<ManagementResponse> {
     let response_data = recv_message(&mut stream)
         .map_err(|e| color_eyre::eyre::eyre!("receiving response: {e}"))?;
 
-    let response: ManagementResponse = serde_json::from_slice(&response_data)
+    let response: ManagementResponse = ciborium::from_reader(&response_data[..])
         .map_err(|e| color_eyre::eyre::eyre!("decoding response: {e}"))?;
 
     Ok(response)

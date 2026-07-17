@@ -1,0 +1,5 @@
+CREATE TABLE daemon_config (
+    key TEXT PRIMARY KEY NOT NULL,
+    value BLOB NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);

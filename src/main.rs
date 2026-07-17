@@ -260,12 +260,19 @@ fn run_list_credentials() -> Result<()> {
         bail!("daemon error: {}", response.error.unwrap_or_default());
     }
     if let Some(result) = &response.result
-        && let Some(credentials) = result.get("credentials").and_then(|v| v.as_array())
+        && let Some(credentials) =
+            management::value_get(result, "credentials").and_then(|v| v.as_array())
     {
         for cred in credentials {
-            let id = cred["id"].as_str().unwrap_or("");
-            let rp_id = cred["rp_id"].as_str().unwrap_or("");
-            let user_name = cred["user_name"].as_str().unwrap_or("");
+            let id = management::value_get(cred, "id")
+                .and_then(|v| v.as_text())
+                .unwrap_or("");
+            let rp_id = management::value_get(cred, "rp_id")
+                .and_then(|v| v.as_text())
+                .unwrap_or("");
+            let user_name = management::value_get(cred, "user_name")
+                .and_then(|v| v.as_text())
+                .unwrap_or("");
             println!("{id}\t{rp_id}\t{user_name}");
         }
     }
@@ -284,11 +291,15 @@ fn run_update_passphrase() -> Result<()> {
         bail!("daemon error: {}", response.error.unwrap_or_default());
     }
     if let Some(result) = &response.result
-        && let Some(results) = result.get("results").and_then(|v| v.as_array())
+        && let Some(results) = management::value_get(result, "results").and_then(|v| v.as_array())
     {
         for r in results {
-            let id = r["credential"].as_str().unwrap_or("?");
-            let status = r["status"].as_str().unwrap_or("?");
+            let id = management::value_get(r, "credential")
+                .and_then(|v| v.as_text())
+                .unwrap_or("?");
+            let status = management::value_get(r, "status")
+                .and_then(|v| v.as_text())
+                .unwrap_or("?");
             println!("{id}\t{status}");
         }
     }
@@ -303,11 +314,15 @@ fn run_update_pcr_reference() -> Result<()> {
         bail!("daemon error: {}", response.error.unwrap_or_default());
     }
     if let Some(result) = &response.result
-        && let Some(results) = result.get("results").and_then(|v| v.as_array())
+        && let Some(results) = management::value_get(result, "results").and_then(|v| v.as_array())
     {
         for r in results {
-            let id = r["credential"].as_str().unwrap_or("?");
-            let status = r["status"].as_str().unwrap_or("?");
+            let id = management::value_get(r, "credential")
+                .and_then(|v| v.as_text())
+                .unwrap_or("?");
+            let status = management::value_get(r, "status")
+                .and_then(|v| v.as_text())
+                .unwrap_or("?");
             println!("{id}\t{status}");
         }
     }
@@ -338,11 +353,15 @@ fn run_update_pcr_policy(args: PcrPolicyArgs) -> Result<()> {
         bail!("daemon error: {}", response.error.unwrap_or_default());
     }
     if let Some(result) = &response.result
-        && let Some(results) = result.get("results").and_then(|v| v.as_array())
+        && let Some(results) = management::value_get(result, "results").and_then(|v| v.as_array())
     {
         for r in results {
-            let id = r["credential"].as_str().unwrap_or("?");
-            let status = r["status"].as_str().unwrap_or("?");
+            let id = management::value_get(r, "credential")
+                .and_then(|v| v.as_text())
+                .unwrap_or("?");
+            let status = management::value_get(r, "status")
+                .and_then(|v| v.as_text())
+                .unwrap_or("?");
             println!("{id}\t{status}");
         }
     }
