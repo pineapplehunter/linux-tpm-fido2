@@ -193,6 +193,16 @@ impl Tpm {
         getrandom::fill(&mut passphrase_salt).wrap_err("generating recovery passphrase salt")?;
         let kdf = RecoveryKdf::argon2id_default();
         let passphrase_hash = recovery_passphrase_hash(&kdf, &passphrase_salt, passphrase)?;
+        self.create_recovery_material_with_hash(label, passphrase_salt, passphrase_hash, kdf)
+    }
+
+    pub fn create_recovery_material_with_hash(
+        &mut self,
+        label: Option<String>,
+        passphrase_salt: Vec<u8>,
+        passphrase_hash: Vec<u8>,
+        kdf: RecoveryKdf,
+    ) -> Result<RecoveryMaterial> {
         let key = self.create_credential_key_with_auth(Some(&passphrase_hash))?;
         let authority_name = public_name(&key.public)?;
 

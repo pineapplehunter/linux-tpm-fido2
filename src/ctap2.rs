@@ -1,5 +1,4 @@
 use std::{
-    env,
     path::PathBuf,
     sync::mpsc,
     thread,
@@ -368,18 +367,19 @@ impl Authenticator {
         }
 
         let owner_uid = self.session.uid;
+        let daemon_passphrase = match store::load_daemon_passphrase_from_dir(&self.store_dir) {
+            Ok(Some((salt, hash, kdf))) => Some((salt, hash, kdf)),
+            _ => None,
+        };
         let Some(tpm) = self.ensure_tpm() else {
             log::warn!("cannot create CTAP2 credential without TPM context");
             return Err(ErrorStatus::OperationDenied);
         };
         let mut credential_id = vec![0u8; 32];
         fill_random(&mut credential_id);
-        let recovery_material = match env::var("LINUX_TPM_FIDO2_RECOVERY_PASSPHRASE") {
-            Ok(passphrase) if !passphrase.is_empty() => {
-                let label = env::var("LINUX_TPM_FIDO2_RECOVERY_LABEL")
-                    .ok()
-                    .filter(|label| !label.is_empty());
-                match tpm.create_recovery_material(label, &passphrase) {
+        let recovery_material = match daemon_passphrase {
+            Some((salt, hash, kdf)) => {
+                match tpm.create_recovery_material_with_hash(None, salt, hash, kdf) {
                     Ok(material) => Some(material),
                     Err(error) => {
                         log::warn!("failed to create TPM recovery material: {error:?}");
@@ -387,7 +387,7 @@ impl Authenticator {
                     }
                 }
             }
-            _ => None,
+            None => None,
         };
         let mut policy = match tpm.create_secure_boot_policy() {
             Ok(policy) => policy,

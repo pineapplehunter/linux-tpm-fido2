@@ -29,8 +29,6 @@
 
           systemd.services.linux-tpm-fido2.wantedBy = lib.mkForce [ ];
           systemd.services.linux-tpm-fido2.environment.RUST_LOG = "debug";
-          systemd.services.linux-tpm-fido2.environment.LINUX_TPM_FIDO2_RECOVERY_PASSPHRASE =
-            "test-recovery-passphrase";
 
           security.polkit.extraConfig = ''
             polkit.addRule(function(action, subject) {

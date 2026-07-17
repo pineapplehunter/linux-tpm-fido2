@@ -71,7 +71,7 @@ in
         Restart = "on-failure";
         RestartSec = 2;
         RuntimeDirectory = "linux-tpm-fido2";
-        RuntimeDirectoryMode = "0777";
+        RuntimeDirectoryMode = "0700";
         StateDirectory = "linux-tpm-fido2";
         StateDirectoryMode = "0700";
         Type = "simple";

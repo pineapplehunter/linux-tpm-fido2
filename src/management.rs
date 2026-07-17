@@ -819,11 +819,8 @@ pub fn serve(
         color_eyre::eyre::eyre!("binding management socket at {socket_path:?}: {e}")
     })?;
 
-    // Make the socket and its directory world-accessible so any user can connect.
-    std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o666))?;
-    if let Some(parent) = socket_path.parent() {
-        let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o755));
-    }
+    // Restrict the socket to root-only access.
+    std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o700))?;
 
     log::info!("management socket at {}", socket_path.display());
 
