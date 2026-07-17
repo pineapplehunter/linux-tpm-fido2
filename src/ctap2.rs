@@ -936,7 +936,7 @@ impl Authenticator {
         params: Option<&[(Value, Value)]>,
     ) -> Result<Vec<u8>, ErrorStatus> {
         let params = params.ok_or(ErrorStatus::MissingParameter)?;
-        let descriptor = map_map(params, 1).ok_or(ErrorStatus::MissingParameter)?;
+        let descriptor = map_map(params, 2).ok_or(ErrorStatus::MissingParameter)?;
         let id = map_bytes(descriptor, "id").ok_or(ErrorStatus::MissingParameter)?;
         let index = self
             .credentials
@@ -957,9 +957,9 @@ impl Authenticator {
         params: Option<&[(Value, Value)]>,
     ) -> Result<Vec<u8>, ErrorStatus> {
         let params = params.ok_or(ErrorStatus::MissingParameter)?;
-        let descriptor = map_map(params, 1).ok_or(ErrorStatus::MissingParameter)?;
+        let descriptor = map_map(params, 2).ok_or(ErrorStatus::MissingParameter)?;
         let id = map_bytes(descriptor, "id").ok_or(ErrorStatus::MissingParameter)?;
-        let user = map_map(params, 2).ok_or(ErrorStatus::MissingParameter)?;
+        let user = map_map(params, 3).ok_or(ErrorStatus::MissingParameter)?;
         let credential = self
             .credentials
             .iter_mut()
