@@ -1,4 +1,3 @@
-{ ... }@parts:
 {
   perSystem =
     {
@@ -7,19 +6,6 @@
       config,
       ...
     }:
-    let
-      linux-tpm-fido2-smoke = pkgs.writeShellApplication {
-        name = "linux-tpm-fido2-smoke";
-        runtimeInputs = with pkgs; [
-          coreutils
-          (python3.withPackages (ps: [
-            ps.cbor2
-            ps.fido2
-          ]))
-        ];
-        text = lib.readFile ./fido-smoke.sh;
-      };
-    in
     {
       checks.nixos-polkit = pkgs.testers.runNixOSTest {
         name = "linux-tpm-fido2-polkit";
@@ -27,7 +13,6 @@
         nodes.machine = {
           imports = [ ./nixos-module.nix ];
 
-          virtualisation.memorySize = 1536;
           virtualisation.tpm.enable = true;
 
           users.users.alice = {
@@ -60,8 +45,11 @@
           '';
 
           environment.systemPackages = with pkgs; [
-            linux-tpm-fido2-smoke
             tpm2-tools
+            (python3.withPackages (ps: [
+              ps.cbor2
+              ps.fido2
+            ]))
           ];
         };
 
@@ -80,12 +68,13 @@
           machine.wait_for_unit("linux-tpm-fido2")
 
           # register and assert should succeed via polkit authorization
-          machine.succeed("WORKDIR=/tmp/linux-tpm-fido2-smoke RP_ID=login.example.test linux-tpm-fido2-smoke register")
-          machine.succeed("WORKDIR=/tmp/linux-tpm-fido2-smoke RP_ID=login.example.test linux-tpm-fido2-smoke assert")
+          machine.succeed("mkdir -p /tmp/linux-tpm-fido2-smoke")
+          machine.succeed("python3 ${./tests/smoke_register.py} /tmp/linux-tpm-fido2-smoke login.example.test alice user-123 'make credential challenge' false")
+          machine.succeed("python3 ${./tests/smoke_assert.py} /tmp/linux-tpm-fido2-smoke login.example.test 'assert credential challenge'")
 
           # regression test for tpm session exhaustion
           for _ in range(20):
-            machine.succeed("WORKDIR=/tmp/linux-tpm-fido2-smoke RP_ID=login.example.test linux-tpm-fido2-smoke assert")
+            machine.succeed("python3 ${./tests/smoke_assert.py} /tmp/linux-tpm-fido2-smoke login.example.test 'assert credential challenge'")
 
           # regression check for reboot persistence
           machine.shutdown()
@@ -93,11 +82,11 @@
           login_alice()
           machine.succeed("systemctl start linux-tpm-fido2")
           machine.wait_for_unit("linux-tpm-fido2")
-          machine.succeed("WORKDIR=/tmp/linux-tpm-fido2-smoke RP_ID=login.example.test linux-tpm-fido2-smoke assert")
+          machine.succeed("python3 ${./tests/smoke_assert.py} /tmp/linux-tpm-fido2-smoke login.example.test 'assert credential challenge'")
 
           # PCR update works through the same credential created with Polkit approval.
           machine.succeed("tpm2_pcrextend 7:sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-          machine.fail("WORKDIR=/tmp/linux-tpm-fido2-smoke RP_ID=login.example.test linux-tpm-fido2-smoke assert")
+          machine.fail("python3 ${./tests/smoke_assert.py} /tmp/linux-tpm-fido2-smoke login.example.test 'assert credential challenge'")
           credential_id = machine.succeed("od -An -v -tx1 /tmp/linux-tpm-fido2-smoke/credential.id | tr -d ' \\n'").strip()
           machine.systemctl("stop linux-tpm-fido2")
           machine.succeed(
@@ -107,7 +96,7 @@
           )
           machine.systemctl("start linux-tpm-fido2")
           machine.wait_for_unit("linux-tpm-fido2")
-          machine.succeed("WORKDIR=/tmp/linux-tpm-fido2-smoke RP_ID=login.example.test linux-tpm-fido2-smoke assert")
+          machine.succeed("python3 ${./tests/smoke_assert.py} /tmp/linux-tpm-fido2-smoke login.example.test 'assert credential challenge'")
 
           # Rewrap the recovery key, reject the old passphrase, and recover with the new one.
           machine.systemctl("stop linux-tpm-fido2")
@@ -130,7 +119,7 @@
           )
           machine.systemctl("start linux-tpm-fido2")
           machine.wait_for_unit("linux-tpm-fido2")
-          machine.succeed("WORKDIR=/tmp/linux-tpm-fido2-smoke RP_ID=login.example.test linux-tpm-fido2-smoke assert")
+          machine.succeed("python3 ${./tests/smoke_assert.py} /tmp/linux-tpm-fido2-smoke login.example.test 'assert credential challenge'")
         '';
       };
     };

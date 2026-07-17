@@ -20,6 +20,7 @@
         inputs.treefmt-nix.flakeModule
         ./nix/nixos-test.nix
         ./nix/nixos-test-polkit.nix
+        ./nix/nixos-test-fido2-manage.nix
         ./nix/module.nix
       ];
 

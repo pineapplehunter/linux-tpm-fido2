@@ -5,6 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use bitflags::bitflags;
 use color_eyre::eyre::WrapErr;
 use zeroize::Zeroize;
 
@@ -12,7 +13,7 @@ use crate::{approval, session, store, tpm};
 use aes::Aes256;
 use aes::cipher::{BlockModeDecrypt, BlockModeEncrypt};
 use cbc::cipher::{KeyIvInit, block_padding::NoPadding};
-use ciborium::value::Value;
+use ciborium::{cbor, value::Value};
 use hkdf::Hkdf;
 use hmac::{Hmac, KeyInit, Mac};
 use p256::{PublicKey, ecdh::EphemeralSecret, elliptic_curve::Generate};
@@ -26,12 +27,16 @@ type Aes256CbcDecryptor = cbc::Decryptor<Aes256>;
 const PIN_UV_AUTH_PROTOCOL: u64 = 2;
 const PIN_RETRIES: u32 = 8;
 const PIN_KDF_ROUNDS: u32 = 100_000;
-const PERMISSION_MAKE_CREDENTIAL: u8 = 0x01;
-const PERMISSION_GET_ASSERTION: u8 = 0x02;
-const PERMISSION_CREDENTIAL_MANAGEMENT: u8 = 0x04;
-const PERMISSION_MASK: u8 =
-    PERMISSION_MAKE_CREDENTIAL | PERMISSION_GET_ASSERTION | PERMISSION_CREDENTIAL_MANAGEMENT;
 const MAX_RESIDENT_CREDENTIALS: usize = 128;
+
+bitflags! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct Ctap2PermissionFlags: u8 {
+        const MAKE_CREDENTIAL = 1 << 0;
+        const GET_ASSERTION = 1 << 1;
+        const CREDENTIAL_MANAGEMENT = 1 << 2;
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -130,7 +135,7 @@ struct ClientPinState {
 #[derive(Debug, Clone)]
 struct PinUvAuthToken {
     value: Vec<u8>,
-    permissions: u8,
+    permissions: Ctap2PermissionFlags,
     rp_id: Option<String>,
     issued_at: Instant,
 }
@@ -295,7 +300,7 @@ impl Authenticator {
             map_integer(&request, 9),
             map_bytes(&request, 8),
             client_data_hash,
-            PERMISSION_MAKE_CREDENTIAL,
+            Ctap2PermissionFlags::MAKE_CREDENTIAL,
             None,
         )?;
         let options = map_map(&request, 7);
@@ -434,11 +439,14 @@ impl Authenticator {
             self.credentials.len()
         );
 
-        Ok(encode_response(Value::Map(vec![
-            (Value::Integer(1.into()), Value::Text("none".to_owned())),
-            (Value::Integer(2.into()), Value::Bytes(auth_data)),
-            (Value::Integer(3.into()), Value::Map(Vec::new())),
-        ])))
+        Ok(encode_response(
+            cbor!({
+                1 => "none",
+                2 => Value::Bytes(auth_data),
+                3 => {},
+            })
+            .unwrap(),
+        ))
     }
 
     fn get_assertion(&mut self, body: &[u8]) -> Result<Vec<u8>, ErrorStatus> {
@@ -451,7 +459,7 @@ impl Authenticator {
             map_integer(&request, 7),
             map_bytes(&request, 6),
             client_data_hash,
-            PERMISSION_GET_ASSERTION,
+            Ctap2PermissionFlags::GET_ASSERTION,
             Some(rp_id),
         )?;
         let allow_list = map_array(&request, 3);
@@ -670,27 +678,28 @@ impl Authenticator {
     fn client_pin(&mut self, body: &[u8]) -> Result<Vec<u8>, ErrorStatus> {
         let request = decode_map(body)?;
         validate_pin_uv_protocol(map_integer(&request, 1))?;
-        let sub_command = map_integer(&request, 3).ok_or(ErrorStatus::MissingParameter)?;
+        let sub_command = map_integer(&request, 2).ok_or(ErrorStatus::MissingParameter)?;
+        let key_agreement = map_map(&request, 3);
 
         match sub_command {
             1 => {
-                if map_value(&request, 2).is_some() || map_value(&request, 4).is_some() {
+                if map_value(&request, 3).is_some() || map_value(&request, 4).is_some() {
                     return Err(ErrorStatus::InvalidParameter);
                 }
-                Ok(encode_response(Value::Map(vec![(
-                    Value::Integer(3.into()),
-                    Value::Integer(
-                        i64::from(
-                            self.client_pin
-                                .as_ref()
-                                .map_or(PIN_RETRIES, |pin| pin.retries),
-                        )
-                        .into(),
-                    ),
-                )])))
+                let retries = i64::from(
+                    self.client_pin
+                        .as_ref()
+                        .map_or(PIN_RETRIES, |pin| pin.retries),
+                );
+                Ok(encode_response(
+                    cbor!({
+                        3 => retries,
+                    })
+                    .unwrap(),
+                ))
             }
             2 => {
-                if map_value(&request, 2).is_some() || map_value(&request, 4).is_some() {
+                if map_value(&request, 3).is_some() || map_value(&request, 4).is_some() {
                     return Err(ErrorStatus::InvalidParameter);
                 }
                 self.key_agreement = Some(EphemeralSecret::generate());
@@ -698,22 +707,88 @@ impl Authenticator {
                     self.key_agreement.as_ref().expect("just generated"),
                 ))
             }
-            3 => self.set_pin(
-                map_map(&request, 2),
-                map_map(&request, 4).ok_or(ErrorStatus::MissingParameter)?,
-            ),
-            4 => self.change_pin(
-                map_map(&request, 2),
-                map_map(&request, 4).ok_or(ErrorStatus::MissingParameter)?,
-            ),
-            6 | 9 => self.get_pin_uv_auth_token(
-                map_map(&request, 2),
-                map_map(&request, 4).ok_or(ErrorStatus::MissingParameter)?,
-            ),
-            10 => self.get_pin_uv_auth_token_using_uv(
-                map_map(&request, 2),
-                map_map(&request, 4).ok_or(ErrorStatus::MissingParameter)?,
-            ),
+            3 => {
+                let (new_pin_enc, pin_uv_auth_param) = if let Some(params) = map_map(&request, 4) {
+                    (map_bytes(params, 1), map_bytes(params, 2))
+                } else {
+                    (map_bytes(&request, 5), map_bytes(&request, 4))
+                };
+                self.set_pin(
+                    key_agreement,
+                    new_pin_enc.ok_or(ErrorStatus::MissingParameter)?,
+                    pin_uv_auth_param.ok_or(ErrorStatus::MissingParameter)?,
+                )
+            }
+            4 => {
+                let (new_pin_enc, pin_hash_enc, pin_uv_auth_param) =
+                    if let Some(params) = map_map(&request, 4) {
+                        (
+                            map_bytes(params, 1),
+                            map_bytes(params, 2),
+                            map_bytes(params, 3),
+                        )
+                    } else {
+                        (
+                            map_bytes(&request, 5),
+                            map_bytes(&request, 6),
+                            map_bytes(&request, 4),
+                        )
+                    };
+                self.change_pin(
+                    key_agreement,
+                    new_pin_enc.ok_or(ErrorStatus::MissingParameter)?,
+                    pin_hash_enc.ok_or(ErrorStatus::MissingParameter)?,
+                    pin_uv_auth_param.ok_or(ErrorStatus::MissingParameter)?,
+                )
+            }
+            6 | 9 => {
+                let (pin_hash_enc, permissions, rp_id) = if let Some(params) = map_map(&request, 4)
+                {
+                    (
+                        map_bytes(params, 1),
+                        map_integer(params, 2)
+                            .and_then(|v| u8::try_from(v).ok())
+                            .and_then(|v| Ctap2PermissionFlags::from_bits(v)),
+                        map_text(params, 3).map(str::to_owned),
+                    )
+                } else {
+                    (
+                        map_bytes(&request, 6),
+                        map_integer(&request, 9)
+                            .and_then(|v| u8::try_from(v).ok())
+                            .and_then(|v| Ctap2PermissionFlags::from_bits(v)),
+                        map_text(&request, 10).map(str::to_owned),
+                    )
+                };
+                self.get_pin_uv_auth_token(
+                    key_agreement,
+                    pin_hash_enc.ok_or(ErrorStatus::MissingParameter)?,
+                    permissions.ok_or(ErrorStatus::MissingParameter)?,
+                    rp_id,
+                )
+            }
+            10 => {
+                let (permissions, rp_id) = if let Some(params) = map_map(&request, 4) {
+                    (
+                        map_integer(params, 2)
+                            .and_then(|v| u8::try_from(v).ok())
+                            .and_then(|v| Ctap2PermissionFlags::from_bits(v)),
+                        map_text(params, 3).map(str::to_owned),
+                    )
+                } else {
+                    (
+                        map_integer(&request, 9)
+                            .and_then(|v| u8::try_from(v).ok())
+                            .and_then(|v| Ctap2PermissionFlags::from_bits(v)),
+                        map_text(&request, 10).map(str::to_owned),
+                    )
+                };
+                self.get_pin_uv_auth_token_using_uv(
+                    key_agreement,
+                    permissions.ok_or(ErrorStatus::MissingParameter)?,
+                    rp_id,
+                )
+            }
             _ => Err(ErrorStatus::InvalidCommand),
         }
     }
@@ -727,7 +802,7 @@ impl Authenticator {
         let params = map_map(&request, 2);
         let protocol = map_integer(&request, 3);
         let auth_param = map_bytes(&request, 4);
-        let message = management_auth_message(params);
+        let message = management_auth_message(sub_command, params);
 
         if self.client_pin.is_none() {
             return Err(ErrorStatus::PinNotSet);
@@ -736,7 +811,7 @@ impl Authenticator {
             protocol,
             auth_param,
             &message,
-            PERMISSION_CREDENTIAL_MANAGEMENT,
+            Ctap2PermissionFlags::CREDENTIAL_MANAGEMENT,
             None,
         )?;
 
@@ -754,16 +829,13 @@ impl Authenticator {
                     .iter()
                     .filter(|credential| credential.discoverable)
                     .count();
-                Ok(encode_response(Value::Map(vec![
-                    (
-                        Value::Integer(1.into()),
-                        Value::Integer((count as u64).into()),
-                    ),
-                    (
-                        Value::Integer(2.into()),
-                        Value::Integer(MAX_RESIDENT_CREDENTIALS.saturating_sub(count).into()),
-                    ),
-                ])))
+                Ok(encode_response(
+                    cbor!({
+                        1 => count as u64,
+                        2 => MAX_RESIDENT_CREDENTIALS.saturating_sub(count) as u64,
+                    })
+                    .unwrap(),
+                ))
             }
             2 => self.enumerate_rps_begin(),
             3 => self.enumerate_rps_next(),
@@ -906,16 +978,15 @@ impl Authenticator {
     fn set_pin(
         &mut self,
         key_agreement: Option<&[(Value, Value)]>,
-        params: &[(Value, Value)],
+        new_pin_enc: &[u8],
+        pin_uv_auth_param: &[u8],
     ) -> Result<Vec<u8>, ErrorStatus> {
         if self.client_pin.is_some() {
             return Err(ErrorStatus::InvalidCommand);
         }
-        let new_pin_enc = map_bytes(params, 1).ok_or(ErrorStatus::MissingParameter)?;
-        if new_pin_enc.len() != 64 {
+        if new_pin_enc.len() < 16 || (new_pin_enc.len() - 16) % 16 != 0 {
             return Err(ErrorStatus::InvalidParameter);
         }
-        let pin_uv_auth_param = map_bytes(params, 2).ok_or(ErrorStatus::MissingParameter)?;
         let (aes_key, hmac_key) = self.pin_uv_keys(key_agreement)?;
         verify_pin_uv_auth_param(&hmac_key, pin_uv_auth_param, new_pin_enc)?;
         let new_pin = decrypt_pin(&aes_key, new_pin_enc)?;
@@ -938,15 +1009,18 @@ impl Authenticator {
     fn change_pin(
         &mut self,
         key_agreement: Option<&[(Value, Value)]>,
-        params: &[(Value, Value)],
+        new_pin_enc: &[u8],
+        pin_hash_enc: &[u8],
+        pin_uv_auth_param: &[u8],
     ) -> Result<Vec<u8>, ErrorStatus> {
         if self.client_pin.is_none() {
             return Err(ErrorStatus::PinNotSet);
         }
-        let new_pin_enc = map_bytes(params, 1).ok_or(ErrorStatus::MissingParameter)?;
-        let pin_hash_enc = map_bytes(params, 2).ok_or(ErrorStatus::MissingParameter)?;
-        let pin_uv_auth_param = map_bytes(params, 3).ok_or(ErrorStatus::MissingParameter)?;
-        if new_pin_enc.len() != 64 || pin_hash_enc.len() != 16 {
+        if new_pin_enc.len() < 16
+            || (new_pin_enc.len() - 16) % 16 != 0
+            || pin_hash_enc.len() < 16
+            || (pin_hash_enc.len() - 16) % 16 != 0
+        {
             return Err(ErrorStatus::InvalidParameter);
         }
         let (aes_key, hmac_key) = self.pin_uv_keys(key_agreement)?;
@@ -977,17 +1051,14 @@ impl Authenticator {
     fn get_pin_uv_auth_token(
         &mut self,
         key_agreement: Option<&[(Value, Value)]>,
-        params: &[(Value, Value)],
+        pin_hash_enc: &[u8],
+        permissions: Ctap2PermissionFlags,
+        rp_id: Option<String>,
     ) -> Result<Vec<u8>, ErrorStatus> {
-        let pin_hash_enc = map_bytes(params, 1).ok_or(ErrorStatus::MissingParameter)?;
-        let permissions = map_integer(params, 2)
-            .and_then(|value| u8::try_from(value).ok())
-            .ok_or(ErrorStatus::MissingParameter)?;
-        let rp_id = map_text(params, 3).map(str::to_owned);
-        if permissions == 0 || permissions & !PERMISSION_MASK != 0 {
+        if permissions.is_empty() {
             return Err(ErrorStatus::InvalidParameter);
         }
-        if permissions & PERMISSION_GET_ASSERTION != 0 && rp_id.is_none() {
+        if permissions.contains(Ctap2PermissionFlags::GET_ASSERTION) && rp_id.is_none() {
             return Err(ErrorStatus::InvalidParameter);
         }
         let (aes_key, _) = self.pin_uv_keys(key_agreement)?;
@@ -1002,25 +1073,25 @@ impl Authenticator {
             rp_id,
             issued_at: Instant::now(),
         });
-        Ok(encode_response(Value::Map(vec![(
-            Value::Integer(2.into()),
-            Value::Bytes(encrypt_aes(&aes_key, &token)?),
-        )])))
+        let encrypted_token = encrypt_aes(&aes_key, &token)?;
+        Ok(encode_response(
+            cbor!({
+                2 => Value::Bytes(encrypted_token),
+            })
+            .unwrap(),
+        ))
     }
 
     fn get_pin_uv_auth_token_using_uv(
         &mut self,
         key_agreement: Option<&[(Value, Value)]>,
-        params: &[(Value, Value)],
+        permissions: Ctap2PermissionFlags,
+        rp_id: Option<String>,
     ) -> Result<Vec<u8>, ErrorStatus> {
-        let permissions = map_integer(params, 2)
-            .and_then(|value| u8::try_from(value).ok())
-            .ok_or(ErrorStatus::MissingParameter)?;
-        let rp_id = map_text(params, 3).map(str::to_owned);
-        if permissions == 0 || permissions & !PERMISSION_MASK != 0 {
+        if permissions.is_empty() {
             return Err(ErrorStatus::InvalidParameter);
         }
-        if permissions & PERMISSION_GET_ASSERTION != 0 && rp_id.is_none() {
+        if permissions.contains(Ctap2PermissionFlags::GET_ASSERTION) && rp_id.is_none() {
             return Err(ErrorStatus::InvalidParameter);
         }
         if !self.session.verify_matches_current()
@@ -1038,10 +1109,13 @@ impl Authenticator {
             rp_id,
             issued_at: Instant::now(),
         });
-        Ok(encode_response(Value::Map(vec![(
-            Value::Integer(2.into()),
-            Value::Bytes(encrypt_aes(&aes_key, &token)?),
-        )])))
+        let encrypted_token = encrypt_aes(&aes_key, &token)?;
+        Ok(encode_response(
+            cbor!({
+                2 => Value::Bytes(encrypted_token),
+            })
+            .unwrap(),
+        ))
     }
 
     fn pin_uv_keys(
@@ -1202,7 +1276,7 @@ impl Authenticator {
         protocol: Option<i128>,
         auth_param: Option<&[u8]>,
         message: &[u8],
-        permission: u8,
+        permission: Ctap2PermissionFlags,
         rp_id: Option<&str>,
     ) -> Result<bool, ErrorStatus> {
         if !self.session.verify_matches_current() {
@@ -1222,7 +1296,7 @@ impl Authenticator {
             self.pin_uv_auth_token = None;
             return Err(ErrorStatus::PinAuthInvalid);
         };
-        if token.permissions & permission == 0
+        if !token.permissions.contains(permission)
             || token
                 .rp_id
                 .as_deref()
@@ -1231,7 +1305,7 @@ impl Authenticator {
             self.pin_uv_auth_token = None;
             return Err(ErrorStatus::PinAuthInvalid);
         }
-        if auth_param.len() != 16 {
+        if auth_param.len() != 16 && auth_param.len() != 32 {
             self.pin_uv_auth_token = None;
             return Err(ErrorStatus::PinAuthInvalid);
         }
@@ -1239,7 +1313,7 @@ impl Authenticator {
             HmacSha256::new_from_slice(&token.value).map_err(|_| ErrorStatus::OperationDenied)?;
         mac.update(message);
         let expected = mac.finalize().into_bytes();
-        if constant_time_equal(&expected[..16], auth_param) {
+        if constant_time_equal(&expected[..auth_param.len()], auth_param) {
             Ok(true)
         } else {
             self.pin_uv_auth_token = None;
@@ -1266,53 +1340,27 @@ pub fn command_name(command: Ctap2Command) -> &'static str {
 }
 
 fn get_info_response(client_pin: bool) -> Vec<u8> {
-    encode_response(Value::Map(vec![
-        (
-            Value::Integer(1.into()),
-            Value::Array(vec![
-                Value::Text("FIDO_2_1".to_owned()),
-                Value::Text("FIDO_2_0".to_owned()),
-            ]),
-        ),
-        (
-            Value::Integer(2.into()),
-            Value::Array(vec![Value::Text("credProps".to_owned())]),
-        ),
-        (Value::Integer(3.into()), Value::Bytes(AAGUID.to_vec())),
-        (
-            Value::Integer(4.into()),
-            Value::Map(vec![
-                (Value::Text("plat".to_owned()), Value::Bool(false)),
-                (Value::Text("rk".to_owned()), Value::Bool(true)),
-                (Value::Text("up".to_owned()), Value::Bool(true)),
-                (Value::Text("uv".to_owned()), Value::Bool(false)),
-                (Value::Text("clientPin".to_owned()), Value::Bool(client_pin)),
-                (Value::Text("credMgmt".to_owned()), Value::Bool(true)),
-            ]),
-        ),
-        (
-            Value::Integer(6.into()),
-            Value::Array(vec![Value::Integer(PIN_UV_AUTH_PROTOCOL.into())]),
-        ),
-        (Value::Integer(5.into()), Value::Integer(1200.into())),
-        (
-            Value::Integer(9.into()),
-            Value::Array(vec![Value::Text("usb".to_owned())]),
-        ),
-        (
-            Value::Integer(10.into()),
-            Value::Array(vec![Value::Map(vec![
-                (
-                    Value::Text("type".to_owned()),
-                    Value::Text("public-key".to_owned()),
-                ),
-                (
-                    Value::Text("alg".to_owned()),
-                    Value::Integer(COSE_ALG_ES256.into()),
-                ),
-            ])]),
-        ),
-    ]))
+    encode_response(
+        cbor!({
+            1 => ["FIDO_2_1", "FIDO_2_0"],
+            2 => ["credProps"],
+            3 => Value::Bytes(AAGUID.to_vec()),
+            4 => {
+                "plat" => false,
+                "rk" => true,
+                "up" => true,
+                "uv" => false,
+                "clientPin" => client_pin,
+                "pinUvAuthToken" => true,
+                "credMgmt" => true,
+            },
+            6 => [PIN_UV_AUTH_PROTOCOL],
+            5 => 1200,
+            9 => ["usb"],
+            10 => [{"type" => "public-key", "alg" => COSE_ALG_ES256}],
+        })
+        .unwrap(),
+    )
 }
 
 fn decode_map(body: &[u8]) -> Result<Vec<(Value, Value)>, ErrorStatus> {
@@ -1385,10 +1433,9 @@ fn validate_pin_uv_protocol(protocol: Option<i128>) -> Result<(), ErrorStatus> {
 
 fn key_agreement_response(secret: &EphemeralSecret) -> Vec<u8> {
     let public_key = secret.public_key().to_sec1_bytes();
-    encode_response(Value::Map(vec![(
-        Value::Integer(1.into()),
-        cose_key_agreement_coordinates(public_key[1..33].to_vec(), public_key[33..65].to_vec()),
-    )]))
+    encode_response(cbor!({
+        1 => cose_key_agreement_coordinates(public_key[1..33].to_vec(), public_key[33..65].to_vec()),
+    }).unwrap())
 }
 
 fn parse_key_agreement(map: &[(Value, Value)]) -> Result<PublicKey, ErrorStatus> {
@@ -1424,13 +1471,13 @@ fn verify_pin_uv_auth_param(
     auth_param: &[u8],
     message: &[u8],
 ) -> Result<(), ErrorStatus> {
-    if auth_param.len() != 16 {
+    if auth_param.len() != 16 && auth_param.len() != 32 {
         return Err(ErrorStatus::PinAuthInvalid);
     }
     let mut mac = HmacSha256::new_from_slice(hmac_key).map_err(|_| ErrorStatus::OperationDenied)?;
     mac.update(message);
     let expected = mac.finalize().into_bytes();
-    constant_time_equal(&expected[..16], auth_param)
+    constant_time_equal(&expected[..auth_param.len()], auth_param)
         .then_some(())
         .ok_or(ErrorStatus::PinAuthInvalid)
 }
@@ -1439,20 +1486,28 @@ fn encrypt_aes(key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, ErrorStatus>
     if plaintext.is_empty() || !plaintext.len().is_multiple_of(16) {
         return Err(ErrorStatus::InvalidParameter);
     }
+    let mut iv = [0u8; 16];
+    fill_random(&mut iv);
     let mut encrypted = plaintext.to_vec();
     let length = encrypted.len();
-    Aes256CbcEncryptor::new(key.into(), &[0u8; 16].into())
+    Aes256CbcEncryptor::new(key.into(), (&iv).into())
         .encrypt_padded::<NoPadding>(&mut encrypted, length)
         .map_err(|_| ErrorStatus::OperationDenied)?;
-    Ok(encrypted)
+    let mut result = iv.to_vec();
+    result.extend(encrypted);
+    Ok(result)
 }
 
 fn decrypt_aes(key: &[u8; 32], ciphertext: &[u8]) -> Result<Vec<u8>, ErrorStatus> {
-    if ciphertext.is_empty() || !ciphertext.len().is_multiple_of(16) {
+    if ciphertext.len() < 16 || !ciphertext.len().is_multiple_of(16) {
         return Err(ErrorStatus::InvalidParameter);
     }
-    let mut decrypted = ciphertext.to_vec();
-    let plaintext = Aes256CbcDecryptor::new(key.into(), &[0u8; 16].into())
+    let iv: &[u8; 16] = ciphertext[..16]
+        .try_into()
+        .map_err(|_| ErrorStatus::InvalidParameter)?;
+    let data = &ciphertext[16..];
+    let mut decrypted = data.to_vec();
+    let plaintext = Aes256CbcDecryptor::new(key.into(), iv.into())
         .decrypt_padded::<NoPadding>(&mut decrypted)
         .map_err(|_| ErrorStatus::OperationDenied)?;
     Ok(plaintext.to_vec())
@@ -1923,13 +1978,13 @@ fn canonical_key_bytes(value: &Value) -> Vec<u8> {
     encoded
 }
 
-fn management_auth_message(params: Option<&[(Value, Value)]>) -> Vec<u8> {
-    let mut encoded = Vec::new();
+fn management_auth_message(sub_command: i128, params: Option<&[(Value, Value)]>) -> Vec<u8> {
+    let mut encoded = vec![sub_command as u8];
     if let Some(params) = params {
         let value = canonicalize_value(Value::Map(params.to_vec()));
         ciborium::into_writer(&value, &mut encoded).expect("serializing management parameters");
     }
-    Sha256::digest(encoded).to_vec()
+    encoded
 }
 
 fn error_response(status: ErrorStatus) -> Vec<u8> {
@@ -2038,8 +2093,8 @@ mod tests {
             Ctap2Command::ClientPin,
             Value::Map(vec![
                 (Value::Integer(1.into()), Value::Integer(2.into())),
-                (Value::Integer(2.into()), client_key.clone()),
-                (Value::Integer(3.into()), Value::Integer(3.into())),
+                (Value::Integer(2.into()), Value::Integer(3.into())),
+                (Value::Integer(3.into()), client_key.clone()),
                 (Value::Integer(4.into()), set_params),
             ]),
         ));
@@ -2049,7 +2104,7 @@ mod tests {
             Ctap2Command::ClientPin,
             Value::Map(vec![
                 (Value::Integer(1.into()), Value::Integer(2.into())),
-                (Value::Integer(3.into()), Value::Integer(1.into())),
+                (Value::Integer(2.into()), Value::Integer(1.into())),
             ]),
         ));
         let Value::Map(retries_map) =
@@ -2065,15 +2120,10 @@ mod tests {
             Ctap2Command::ClientPin,
             Value::Map(vec![
                 (Value::Integer(1.into()), Value::Integer(2.into())),
-                (Value::Integer(2.into()), client_key),
-                (Value::Integer(3.into()), Value::Integer(6.into())),
-                (
-                    Value::Integer(4.into()),
-                    Value::Map(vec![
-                        (Value::Integer(1.into()), Value::Bytes(encrypted_pin_hash)),
-                        (Value::Integer(2.into()), Value::Integer(1.into())),
-                    ]),
-                ),
+                (Value::Integer(2.into()), Value::Integer(6.into())),
+                (Value::Integer(3.into()), client_key),
+                (Value::Integer(6.into()), Value::Bytes(encrypted_pin_hash)),
+                (Value::Integer(9.into()), Value::Integer(1.into())),
             ]),
         ));
         assert_eq!(token_response[0], 0x00);
@@ -2097,18 +2147,13 @@ mod tests {
             Ctap2Command::ClientPin,
             Value::Map(vec![
                 (Value::Integer(1.into()), Value::Integer(2.into())),
+                (Value::Integer(2.into()), Value::Integer(6.into())),
                 (
-                    Value::Integer(2.into()),
+                    Value::Integer(3.into()),
                     client_key_agreement(&client_secret),
                 ),
-                (Value::Integer(3.into()), Value::Integer(6.into())),
-                (
-                    Value::Integer(4.into()),
-                    Value::Map(vec![
-                        (Value::Integer(1.into()), Value::Bytes(wrong_encrypted_hash)),
-                        (Value::Integer(2.into()), Value::Integer(1.into())),
-                    ]),
-                ),
+                (Value::Integer(6.into()), Value::Bytes(wrong_encrypted_hash)),
+                (Value::Integer(9.into()), Value::Integer(1.into())),
             ]),
         ));
         assert_eq!(wrong_response, vec![ErrorStatus::PinInvalid as u8]);
@@ -2118,7 +2163,7 @@ mod tests {
             Ctap2Command::ClientPin,
             Value::Map(vec![
                 (Value::Integer(1.into()), Value::Integer(2.into())),
-                (Value::Integer(3.into()), Value::Integer(1.into())),
+                (Value::Integer(2.into()), Value::Integer(1.into())),
             ]),
         ));
         let Value::Map(restored_map) =
@@ -2155,7 +2200,7 @@ mod tests {
         });
         authenticator.pin_uv_auth_token = Some(PinUvAuthToken {
             value: token.clone(),
-            permissions: PERMISSION_CREDENTIAL_MANAGEMENT,
+            permissions: Ctap2PermissionFlags::CREDENTIAL_MANAGEMENT,
             rp_id: None,
             issued_at: Instant::now(),
         });
@@ -2165,7 +2210,7 @@ mod tests {
             (Value::Integer(3.into()), Value::Integer(2.into())),
             (
                 Value::Integer(4.into()),
-                Value::Bytes(management_pin_auth(&token, None)),
+                Value::Bytes(management_pin_auth(&token, 1, None)),
             ),
         ]);
         let response =
@@ -2714,7 +2759,7 @@ mod tests {
             Ctap2Command::ClientPin,
             Value::Map(vec![
                 (Value::Integer(1.into()), Value::Integer(2.into())),
-                (Value::Integer(3.into()), Value::Integer(2.into())),
+                (Value::Integer(2.into()), Value::Integer(2.into())),
             ]),
         ));
         let Value::Map(response) = ciborium::from_reader::<Value, _>(&response[1..]).expect("CBOR")
@@ -2738,8 +2783,12 @@ mod tests {
         mac.finalize().into_bytes()[..16].to_vec()
     }
 
-    fn management_pin_auth(key: &[u8], params: Option<&[(Value, Value)]>) -> Vec<u8> {
-        let message = management_auth_message(params);
+    fn management_pin_auth(
+        key: &[u8],
+        sub_command: i128,
+        params: Option<&[(Value, Value)]>,
+    ) -> Vec<u8> {
+        let message = management_auth_message(sub_command, params);
         let mut mac = HmacSha256::new_from_slice(key).expect("HMAC key");
         mac.update(&message);
         mac.finalize().into_bytes()[..16].to_vec()

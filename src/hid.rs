@@ -34,7 +34,7 @@ pub fn create_params() -> CreateParams {
         name: "Linux TPM FIDO2".to_owned(),
         phys: "linux-tpm-fido2/uhid".to_owned(),
         uniq: "linux-tpm-fido2-dev".to_owned(),
-        bus: Bus::VIRTUAL,
+        bus: Bus::USB,
         vendor: VENDOR_ID,
         product: PRODUCT_ID,
         version: 1,

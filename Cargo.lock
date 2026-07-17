@@ -1511,6 +1511,7 @@ version = "0.1.0"
 dependencies = [
  "aes",
  "argon2",
+ "bitflags 2.13.1",
  "cbc",
  "ciborium",
  "clap",
