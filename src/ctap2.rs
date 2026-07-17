@@ -260,6 +260,29 @@ impl Authenticator {
 
         log::info!("ctap2 command: {}", command_name(command));
 
+        #[cfg(not(test))]
+        {
+            if matches!(
+                command,
+                Ctap2Command::MakeCredential
+                    | Ctap2Command::GetAssertion
+                    | Ctap2Command::GetNextAssertion
+                    | Ctap2Command::CredentialManagement
+            ) {
+                match store::load_daemon_passphrase_from_dir(&self.store_dir) {
+                    Ok(Some(_)) => {}
+                    Ok(None) => {
+                        log::info!("daemon passphrase not set; blocking FIDO2 operation");
+                        return error_response(ErrorStatus::OperationDenied);
+                    }
+                    Err(e) => {
+                        log::error!("failed to check daemon passphrase: {e}");
+                        return error_response(ErrorStatus::OperationDenied);
+                    }
+                }
+            }
+        }
+
         match match command {
             Ctap2Command::GetInfo => Ok(get_info_response(self.client_pin.is_some())),
             Ctap2Command::ClientPin => self.client_pin(body),
@@ -2245,14 +2268,6 @@ mod tests {
     use super::*;
     use p256::elliptic_curve::sec1::ToSec1Point;
 
-    fn ensure_auto_approve() {
-        static INIT: std::sync::Once = std::sync::Once::new();
-        INIT.call_once(|| {
-            // SAFETY: tests are single-threaded per Rust test runner contract
-            unsafe { std::env::set_var("LINUX_TPM_FIDO2_AUTO_APPROVE", "1") };
-        });
-    }
-
     #[test]
     fn get_info_starts_with_success() {
         let response = Authenticator::default().handle_cbor(&[Ctap2Command::GetInfo.into()]);
@@ -2894,7 +2909,6 @@ mod tests {
         rp_id: &str,
         credentials: Vec<StoredCredentialTest>,
     ) -> Authenticator {
-        ensure_auto_approve();
         let store_dir = test_store_dir("authenticator");
         let stored_credentials: Vec<_> = credentials
             .iter()

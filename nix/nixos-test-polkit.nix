@@ -104,6 +104,16 @@
           print("set-default-pcr-policy:", output)
           assert "default PCR policy set to [1, 7]" in output, f"Unexpected output: {output}"
 
+          # -- Set daemon passphrase (first-time: empty old passphrase) --
+          mgmt_expect(
+              "update-passphrase",
+              'expect "Enter current daemon passphrase (leave empty if not set yet): "; '
+              'send "\\r"; '
+              'expect "Enter new daemon passphrase: "; '
+              'send "test-recovery-passphrase\\r"; '
+              'expect eof',
+          )
+
           # -- register and assert via polkit authorization --
           machine.succeed("mkdir -p /tmp/linux-tpm-fido2-smoke")
           ret_reg, output_reg = machine.execute(
@@ -164,9 +174,9 @@
           # -- Passphrase change via update-passphrase (expect for old+new) --
           mgmt_expect(
               "update-passphrase",
-              'expect "Enter current recovery passphrase: "; '
+              'expect "Enter current daemon passphrase (leave empty if not set yet): "; '
               'send "test-recovery-passphrase\\r"; '
-              'expect "Enter new recovery passphrase: "; '
+              'expect "Enter new daemon passphrase: "; '
               'send "new-recovery-passphrase\\r"; '
               'expect eof',
           )

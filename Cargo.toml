@@ -4,24 +4,28 @@ version = "0.1.0"
 edition = "2024"
 license = "GPL3"
 
-[features]
-auto-approve = []
-
 [dependencies]
+aes = "0.9"
+argon2 = "0.5"
+base64 = "0.22"
+bitflags = { version = "2.13.1", features = ["std"] }
+cbc = "0.2"
 ciborium = "0.2.2"
 clap = { version = "4.5.53", features = ["derive"] }
 color-eyre = "0.6.5"
 env_logger = "0.11.8"
 getrandom = "0.4.3"
 hex = "0.4"
+hkdf = "0.13"
+hmac = "0.13"
 libc = "0.2"
 log = "0.4.27"
 p256 = { version = "0.14", features = ["ecdh", "ecdsa", "getrandom", "pem"] }
+pbkdf2 = "0.13"
 rcgen = { version = "0.14.8", features = ["ring"] }
+rpassword = "7.3"
 serde = { version = "1.0.228", features = ["derive"] }
 sha2 = "0.11"
-hmac = "0.13"
-pbkdf2 = "0.13"
 sqlx = { version = "0.9.0", features = [
   "runtime-tokio",
   "sqlite",
@@ -32,11 +36,4 @@ tokio = { version = "1.52.3", features = ["rt", "time"] }
 tss-esapi = "7.7.0"
 uhid-virt = "0.0.8"
 zbus = { version = "5", features = ["blocking"] }
-base64 = "0.22"
-aes = "0.9"
-cbc = "0.2"
-hkdf = "0.13"
 zeroize = "1.8"
-rpassword = "7.3"
-argon2 = "0.5"
-bitflags = { version = "2.13.1", features = ["std"] }

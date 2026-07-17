@@ -334,6 +334,82 @@ async fn save_default_pcr_policy_async(dir: &Path, indices: &[u32]) -> Result<()
     Ok(())
 }
 
+pub fn load_daemon_passphrase_from_dir(
+    dir: impl AsRef<Path>,
+) -> Result<Option<(Vec<u8>, Vec<u8>, RecoveryKdf)>> {
+    block_on_store(load_daemon_passphrase_async(dir.as_ref()))
+}
+
+pub fn save_daemon_passphrase_to_dir(
+    dir: impl AsRef<Path>,
+    salt: &[u8],
+    hash: &[u8],
+    kdf: &RecoveryKdf,
+) -> Result<()> {
+    block_on_store(save_daemon_passphrase_async(dir.as_ref(), salt, hash, kdf))
+}
+
+async fn load_daemon_passphrase_async(
+    dir: &Path,
+) -> Result<Option<(Vec<u8>, Vec<u8>, RecoveryKdf)>> {
+    let pool = open_database(dir).await?;
+    let row = sqlx::query("SELECT value FROM daemon_config WHERE key = 'daemon_passphrase'")
+        .fetch_optional(&pool)
+        .await
+        .wrap_err("loading daemon passphrase from database")?;
+
+    match row {
+        Some(r) => {
+            let blob: Vec<u8> = r.get("value");
+            let (hash, salt, memory_kib, iterations, parallelism): (
+                Vec<u8>,
+                Vec<u8>,
+                u32,
+                u32,
+                u32,
+            ) = ciborium::from_reader(&blob[..])
+                .wrap_err("deserializing daemon passphrase from database")?;
+            let kdf = RecoveryKdf::Argon2id {
+                memory_kib,
+                iterations,
+                parallelism,
+            };
+            Ok(Some((salt, hash, kdf)))
+        }
+        None => Ok(None),
+    }
+}
+
+async fn save_daemon_passphrase_async(
+    dir: &Path,
+    salt: &[u8],
+    hash: &[u8],
+    kdf: &RecoveryKdf,
+) -> Result<()> {
+    let pool = open_database(dir).await?;
+    let (memory_kib, iterations, parallelism) = match *kdf {
+        RecoveryKdf::Argon2id {
+            memory_kib,
+            iterations,
+            parallelism,
+        } => (memory_kib, iterations, parallelism),
+    };
+    let mut blob = Vec::new();
+    ciborium::into_writer(
+        &(hash, salt, memory_kib, iterations, parallelism),
+        &mut blob,
+    )
+    .wrap_err("serializing daemon passphrase")?;
+    sqlx::query(
+        "INSERT OR REPLACE INTO daemon_config (key, value, updated_at) VALUES ('daemon_passphrase', ?, datetime('now'))",
+    )
+    .bind(blob)
+    .execute(&pool)
+    .await
+    .wrap_err("saving daemon passphrase to database")?;
+    Ok(())
+}
+
 async fn load_ctap2_credentials_async(
     dir: &Path,
     user_id: Option<u32>,

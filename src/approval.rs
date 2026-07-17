@@ -3,9 +3,10 @@ use std::io::{self, Write};
 use crate::session;
 
 pub fn approve(prompt: &str, session: &session::SessionContext) -> bool {
-    #[cfg(any(feature = "auto-approve", test))]
-    if std::env::var("LINUX_TPM_FIDO2_AUTO_APPROVE").is_ok() {
-        log::warn!("auto-approving (LINUX_TPM_FIDO2_AUTO_APPROVE): {prompt}");
+    #[cfg(test)]
+    {
+        let _ = session;
+        log::warn!("auto-approving in test: {prompt}");
         return true;
     }
 
@@ -69,8 +70,6 @@ mod tests {
             wayland_display: None,
             dbus_session_bus_address: None,
         };
-        // SAFETY: tests are single-threaded
-        unsafe { std::env::set_var("LINUX_TPM_FIDO2_AUTO_APPROVE", "1") };
         assert!(approve("Approve passkey request", &session));
     }
 }

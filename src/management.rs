@@ -1,4 +1,6 @@
 use std::io::{Read, Write};
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::io::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -12,6 +14,29 @@ use zeroize::Zeroize;
 
 use crate::{ctap2, store, tpm};
 
+fn peer_uid(stream: &UnixStream) -> Result<u32> {
+    let mut ucred = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let rc = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            &mut ucred as *mut _ as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    if rc != 0 {
+        Err(color_eyre::eyre::eyre!("SO_PEERCRED failed: {rc}"))
+    } else {
+        Ok(ucred.uid)
+    }
+}
+
 /// Returns the well-known path for the management Unix socket.
 pub fn management_socket_path() -> PathBuf {
     PathBuf::from("/run/linux-tpm-fido2/management.sock")
@@ -24,7 +49,8 @@ pub enum ManagementRequest {
     ListCredentials,
     #[serde(rename = "update-passphrase")]
     UpdatePassphrase {
-        old_passphrase: String,
+        #[serde(default)]
+        old_passphrase: Option<String>,
         new_passphrase: String,
     },
     #[serde(rename = "update-pcr-reference")]
@@ -73,8 +99,12 @@ fn send_message(stream: &mut UnixStream, data: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn handle_list_credentials(store_dir: &Path, _tpm_path: &Path) -> ManagementResponse {
-    match store::load_ctap2_credentials_from_dir(store_dir, None) {
+fn filter_uid(uid: u32) -> Option<u32> {
+    if uid == 0 { None } else { Some(uid) }
+}
+
+fn handle_list_credentials(store_dir: &Path, peer_uid: u32) -> ManagementResponse {
+    match store::load_ctap2_credentials_from_dir(store_dir, filter_uid(peer_uid)) {
         Ok(credentials) => {
             let creds: Vec<ciborium::value::Value> = credentials
                 .iter()
@@ -101,16 +131,90 @@ fn handle_list_credentials(store_dir: &Path, _tpm_path: &Path) -> ManagementResp
         },
     }
 }
-
 fn handle_update_passphrase(
     store_dir: &Path,
     tpm_cmd_tx: Option<&ctap2::TpmCmdSender>,
-    old_passphrase: &str,
+    peer_uid: u32,
+    old_passphrase: Option<&str>,
     new_passphrase: &str,
 ) -> ManagementResponse {
-    let credentials = match store::load_ctap2_credentials_from_dir(store_dir, None) {
+    // Validate or set the daemon passphrase.
+    match store::load_daemon_passphrase_from_dir(store_dir) {
+        Ok(Some((ref salt, ref hash, ref kdf))) => {
+            let Some(old) = old_passphrase else {
+                return ManagementResponse {
+                    ok: false,
+                    error: Some("daemon passphrase is already set; provide the current passphrase to change it".into()),
+                    result: None,
+                };
+            };
+            let mut computed = match tpm::recovery_passphrase_hash(kdf, salt, old) {
+                Ok(h) => h,
+                Err(e) => {
+                    return ManagementResponse {
+                        ok: false,
+                        error: Some(format!("passphrase validation error: {e}")),
+                        result: None,
+                    };
+                }
+            };
+            if computed != *hash {
+                computed.zeroize();
+                return ManagementResponse {
+                    ok: false,
+                    error: Some("current passphrase does not match".into()),
+                    result: None,
+                };
+            }
+            computed.zeroize();
+        }
+        Ok(None) => { /* first-time setup */ }
+        Err(e) => {
+            return ManagementResponse {
+                ok: false,
+                error: Some(format!("failed to check daemon passphrase: {e}")),
+                result: None,
+            };
+        }
+    }
+
+    let mut new_salt = vec![0u8; 32];
+    if getrandom::fill(&mut new_salt).is_err() {
+        return ManagementResponse {
+            ok: false,
+            error: Some("failed to generate random salt".into()),
+            result: None,
+        };
+    }
+    let new_kdf = tpm::RecoveryKdf::argon2id_default();
+    let new_hash = match tpm::recovery_passphrase_hash(&new_kdf, &new_salt, new_passphrase) {
+        Ok(h) => h,
+        Err(e) => {
+            new_salt.zeroize();
+            return ManagementResponse {
+                ok: false,
+                error: Some(format!("new passphrase hash error: {e}")),
+                result: None,
+            };
+        }
+    };
+
+    if let Err(e) = store::save_daemon_passphrase_to_dir(store_dir, &new_salt, &new_hash, &new_kdf)
+    {
+        new_salt.zeroize();
+        return ManagementResponse {
+            ok: false,
+            error: Some(format!("failed to save daemon passphrase: {e}")),
+            result: None,
+        };
+    }
+
+    // Update per-credential recovery passphrases to match the new daemon passphrase.
+    let credentials = match store::load_ctap2_credentials_from_dir(store_dir, filter_uid(peer_uid))
+    {
         Ok(c) => c,
         Err(e) => {
+            new_salt.zeroize();
             return ManagementResponse {
                 ok: false,
                 error: Some(format!("{e}")),
@@ -137,69 +241,6 @@ fn handle_update_passphrase(
             }
         };
 
-        // Validate old passphrase (no TPM needed).
-        let mut old_hash = match tpm::recovery_passphrase_hash(
-            &recovery.kdf,
-            &recovery.passphrase_salt,
-            old_passphrase,
-        ) {
-            Ok(h) => h,
-            Err(e) => {
-                results.push(
-                    cbor!({
-                        "credential" => id_hex,
-                        "status" => "error",
-                        "error" => format!("passphrase validation error: {e}"),
-                    })
-                    .unwrap(),
-                );
-                continue;
-            }
-        };
-        if old_hash != recovery.passphrase_hash {
-            old_hash.zeroize();
-            results.push(
-                cbor!({
-                    "credential" => id_hex,
-                    "status" => "error",
-                    "error" => "recovery passphrase does not match",
-                })
-                .unwrap(),
-            );
-            continue;
-        }
-        old_hash.zeroize();
-
-        // Generate new salt and hash (no TPM needed).
-        let mut new_salt = vec![0u8; 32];
-        if getrandom::fill(&mut new_salt).is_err() {
-            results.push(
-                cbor!({
-                    "credential" => id_hex,
-                    "status" => "error",
-                    "error" => "failed to generate random salt",
-                })
-                .unwrap(),
-            );
-            continue;
-        }
-        let new_kdf = tpm::RecoveryKdf::argon2id_default();
-        let new_hash = match tpm::recovery_passphrase_hash(&new_kdf, &new_salt, new_passphrase) {
-            Ok(h) => h,
-            Err(e) => {
-                new_salt.zeroize();
-                results.push(
-                    cbor!({
-                        "credential" => id_hex,
-                        "status" => "error",
-                        "error" => format!("new passphrase hash error: {e}"),
-                    })
-                    .unwrap(),
-                );
-                continue;
-            }
-        };
-
         let recovery_key = tpm::TpmCredential {
             private: recovery.key.private.clone(),
             public: recovery.key.public.clone(),
@@ -208,7 +249,6 @@ fn handle_update_passphrase(
             auth_value: recovery.key.auth_value.clone(),
         };
 
-        // Send TPM operation to main thread, or fall back to direct open.
         let cmd_result = if let Some(tx) = tpm_cmd_tx {
             let (resp_tx, resp_rx) = mpsc::channel();
             let cmd = ctap2::TpmCommand::PassphraseChange(ctap2::PassphraseChangeCommand {
@@ -228,17 +268,11 @@ fn handle_update_passphrase(
                 Err(color_eyre::eyre::eyre!("failed to send TPM command"))
             }
         } else {
-            // Fallback: open TPM directly (for testing without daemon).
-            ctap2::change_recovery_passphrase(
-                store_dir,
-                Some(Path::new("/dev/tpmrm0")),
-                &credential.id,
-                old_passphrase,
-                new_passphrase,
-            )
+            Err(color_eyre::eyre::eyre!(
+                "TPM not available for recovery passphrase update"
+            ))
         };
 
-        new_salt.zeroize();
         match cmd_result {
             Ok(()) => {
                 results.push(
@@ -263,19 +297,24 @@ fn handle_update_passphrase(
         }
     }
 
+    new_salt.zeroize();
+
     ManagementResponse {
         ok: true,
         error: None,
-        result: Some(cbor!({ "results" => results }).unwrap()),
+        result: Some(
+            cbor!({ "status" => "daemon passphrase updated", "results" => results }).unwrap(),
+        ),
     }
 }
-
 fn handle_update_pcr_reference(
     store_dir: &Path,
+    peer_uid: u32,
     passphrase: &str,
     tpm_cmd_tx: Option<&ctap2::TpmCmdSender>,
 ) -> ManagementResponse {
-    let credentials = match store::load_ctap2_credentials_from_dir(store_dir, None) {
+    let credentials = match store::load_ctap2_credentials_from_dir(store_dir, filter_uid(peer_uid))
+    {
         Ok(c) => c,
         Err(e) => {
             return ManagementResponse {
@@ -441,11 +480,13 @@ fn handle_update_pcr_reference(
 fn handle_update_pcr_policy(
     store_dir: &Path,
     tpm_cmd_tx: Option<&ctap2::TpmCmdSender>,
+    peer_uid: u32,
     passphrase: &str,
     _pcr_indices: &[u32],
     credential_target: &CredentialTarget,
 ) -> ManagementResponse {
-    let credentials = match store::load_ctap2_credentials_from_dir(store_dir, None) {
+    let credentials = match store::load_ctap2_credentials_from_dir(store_dir, filter_uid(peer_uid))
+    {
         Ok(c) => c,
         Err(e) => {
             return ManagementResponse {
@@ -677,16 +718,23 @@ fn handle_set_default_pcr_policy(store_dir: &Path, pcr_indices: &[u32]) -> Manag
 fn dispatch(
     store_dir: &Path,
     tpm_cmd_tx: Option<&ctap2::TpmCmdSender>,
+    peer_uid: u32,
     request: &ManagementRequest,
 ) -> ManagementResponse {
     match request {
-        ManagementRequest::ListCredentials => handle_list_credentials(store_dir, Path::new("")),
+        ManagementRequest::ListCredentials => handle_list_credentials(store_dir, peer_uid),
         ManagementRequest::UpdatePassphrase {
             old_passphrase,
             new_passphrase,
-        } => handle_update_passphrase(store_dir, tpm_cmd_tx, old_passphrase, new_passphrase),
+        } => handle_update_passphrase(
+            store_dir,
+            tpm_cmd_tx,
+            peer_uid,
+            old_passphrase.as_deref(),
+            new_passphrase,
+        ),
         ManagementRequest::UpdatePcrReference { passphrase } => {
-            handle_update_pcr_reference(store_dir, passphrase, tpm_cmd_tx)
+            handle_update_pcr_reference(store_dir, peer_uid, passphrase, tpm_cmd_tx)
         }
         ManagementRequest::UpdatePcrPolicy {
             passphrase,
@@ -695,6 +743,7 @@ fn dispatch(
         } => handle_update_pcr_policy(
             store_dir,
             tpm_cmd_tx,
+            peer_uid,
             passphrase,
             pcr_indices,
             credential_target,
@@ -710,6 +759,14 @@ fn handle_client(
     store_dir: PathBuf,
     tpm_cmd_tx: Option<ctap2::TpmCmdSender>,
 ) {
+    let peer_uid = match peer_uid(&stream) {
+        Ok(uid) => uid,
+        Err(e) => {
+            log::warn!("management: failed to get peer UID: {e}");
+            return;
+        }
+    };
+
     let data = match recv_message(&mut stream) {
         Ok(d) => d,
         Err(e) => {
@@ -734,7 +791,7 @@ fn handle_client(
         }
     };
 
-    let response = dispatch(&store_dir, tpm_cmd_tx.as_ref(), &request);
+    let response = dispatch(&store_dir, tpm_cmd_tx.as_ref(), peer_uid, &request);
     let mut encoded = Vec::new();
     if let Err(e) = ciborium::into_writer(&response, &mut encoded) {
         log::warn!("management: failed to encode response: {e}");
@@ -761,6 +818,12 @@ pub fn serve(
     let listener = UnixListener::bind(&socket_path).map_err(|e| {
         color_eyre::eyre::eyre!("binding management socket at {socket_path:?}: {e}")
     })?;
+
+    // Make the socket and its directory world-accessible so any user can connect.
+    std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o666))?;
+    if let Some(parent) = socket_path.parent() {
+        let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o755));
+    }
 
     log::info!("management socket at {}", socket_path.display());
 

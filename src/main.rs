@@ -117,15 +117,6 @@ fn run_daemon(args: DaemonArgs) -> Result<()> {
     let session = session::SessionContext::detect();
     log::info!("session model: {}", session.describe());
 
-    #[cfg(feature = "auto-approve")]
-    if env::var("LINUX_TPM_FIDO2_AUTO_APPROVE").is_ok() {
-        log::warn!("═══════════════════════════════════════════════════════");
-        log::warn!("  LINUX_TPM_FIDO2_AUTO_APPROVE is SET — all approval");
-        log::warn!("  prompts will be silently accepted.  DO NOT use this");
-        log::warn!("  in production or with real credentials.");
-        log::warn!("═══════════════════════════════════════════════════════");
-    }
-
     if args.dry_run {
         log::info!("dry run: not opening UHID or TPM devices");
         return Ok(());
@@ -280,8 +271,10 @@ fn run_list_credentials() -> Result<()> {
 }
 
 fn run_update_passphrase() -> Result<()> {
-    let old = prompt_password_confirm("Enter current recovery passphrase: ")?;
-    let new = prompt_password_confirm("Enter new recovery passphrase: ")?;
+    let old = prompt_password("Enter current daemon passphrase (leave empty if not set yet): ")
+        .map_err(|e| eyre!("reading passphrase: {e}"))?;
+    let old = if old.is_empty() { None } else { Some(old) };
+    let new = prompt_password_confirm("Enter new daemon passphrase: ")?;
     let request = management::ManagementRequest::UpdatePassphrase {
         old_passphrase: old,
         new_passphrase: new,
@@ -290,19 +283,7 @@ fn run_update_passphrase() -> Result<()> {
     if !response.ok {
         bail!("daemon error: {}", response.error.unwrap_or_default());
     }
-    if let Some(result) = &response.result
-        && let Some(results) = management::value_get(result, "results").and_then(|v| v.as_array())
-    {
-        for r in results {
-            let id = management::value_get(r, "credential")
-                .and_then(|v| v.as_text())
-                .unwrap_or("?");
-            let status = management::value_get(r, "status")
-                .and_then(|v| v.as_text())
-                .unwrap_or("?");
-            println!("{id}\t{status}");
-        }
-    }
+    println!("Daemon passphrase updated.");
     Ok(())
 }
 
