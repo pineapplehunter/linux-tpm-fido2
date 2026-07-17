@@ -8,7 +8,6 @@ use color_eyre::{
     Result,
     eyre::{WrapErr, eyre},
 };
-use pbkdf2::pbkdf2_hmac;
 use sha2::{Digest as ShaDigest, Sha256};
 use tss_esapi::{
     Context,
@@ -47,9 +46,6 @@ pub struct PcrPolicyBinding {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecoveryKdf {
-    Pbkdf2Sha256 {
-        iterations: u32,
-    },
     Argon2id {
         memory_kib: u32,
         iterations: u32,
@@ -63,12 +59,6 @@ impl RecoveryKdf {
             memory_kib: 65_536,
             iterations: 3,
             parallelism: 1,
-        }
-    }
-
-    pub const fn legacy_pbkdf2() -> Self {
-        Self::Pbkdf2Sha256 {
-            iterations: RECOVERY_PBKDF2_ITERATIONS,
         }
     }
 }
@@ -940,8 +930,6 @@ fn default_pcr_selection(pcr_indices: Option<&[u32]>) -> Result<(PcrSelectionLis
     Ok((selection, name))
 }
 
-const RECOVERY_PBKDF2_ITERATIONS: u32 = 600_000;
-
 pub fn recovery_passphrase_hash(
     kdf: &RecoveryKdf,
     passphrase_salt: &[u8],
@@ -949,14 +937,6 @@ pub fn recovery_passphrase_hash(
 ) -> Result<Vec<u8>> {
     let mut output = vec![0u8; 32];
     match kdf {
-        RecoveryKdf::Pbkdf2Sha256 { iterations } => {
-            pbkdf2_hmac::<Sha256>(
-                passphrase.as_bytes(),
-                passphrase_salt,
-                *iterations,
-                &mut output,
-            );
-        }
         RecoveryKdf::Argon2id {
             memory_kib,
             iterations,
@@ -1024,18 +1004,18 @@ mod tests {
     use super::{RecoveryKdf, recovery_passphrase_hash, recovery_passphrase_matches};
 
     #[test]
-    fn recovery_passphrase_hash_uses_pbkdf2_is_deterministic() {
+    fn recovery_passphrase_hash_is_deterministic() {
         let salt = b"0123456789abcdef0123456789abcdef";
-        let kdf = RecoveryKdf::legacy_pbkdf2();
+        let kdf = RecoveryKdf::argon2id_default();
         let hash = recovery_passphrase_hash(&kdf, salt, "correct horse battery staple")
-            .expect("derive PBKDF2 hash");
+            .expect("derive Argon2id hash");
 
-        assert_eq!(hash.len(), 32, "PBKDF2 output should be 32 bytes (SHA-256)");
+        assert_eq!(hash.len(), 32, "Argon2id output should be 32 bytes");
         assert_eq!(
             hash,
             recovery_passphrase_hash(&kdf, salt, "correct horse battery staple")
-                .expect("derive PBKDF2 hash"),
-            "PBKDF2 should be deterministic with same salt and passphrase"
+                .expect("derive Argon2id hash"),
+            "Argon2id should be deterministic with same salt and passphrase"
         );
         assert!(
             recovery_passphrase_matches(&kdf, salt, "correct horse battery staple", &hash)

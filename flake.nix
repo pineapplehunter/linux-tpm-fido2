@@ -60,24 +60,38 @@
             ];
           };
 
-          devShells.default = pkgs.mkShell {
-            env.SQLX_OFFLINE = "true";
+          devShells.default =
+            let
+              sqlx-prepare-shell = pkgs.writeShellScriptBin "sqlx-prepare-script" ''
+                set -x
+                TMP=$(mktemp)
+                trap "rm -rf $TMP" EXIT
+                export SQLX_OFFLINE=false
+                export DATABASE_URL=sqlite://$TMP
+                cargo sqlx migrate run
+                cargo sqlx prepare
+              '';
+            in
+            pkgs.mkShell {
+              env.SQLX_OFFLINE = "true";
 
-            packages = with pkgs; [
-              pkg-config
-              rustPlatform.bindgenHook
-              sqlx-cli
-              tpm2-tss
-              tpm2-tools
-              (rust-bin.stable.latest.default.override {
-                extensions = [
-                  "rust-src"
-                  "rust-analyzer"
-                ];
-                targets = [ ];
-              })
-            ];
-          };
+              packages = with pkgs; [
+                pkg-config
+                rustPlatform.bindgenHook
+                sqlx-cli
+                tpm2-tss
+                tpm2-tools
+                sqlite
+                sqlx-prepare-shell
+                (rust-bin.stable.latest.default.override {
+                  extensions = [
+                    "rust-src"
+                    "rust-analyzer"
+                  ];
+                  targets = [ ];
+                })
+              ];
+            };
 
           # Uncomment to build any package with `nix build .#package`
           #legacyPackages = pkgs;

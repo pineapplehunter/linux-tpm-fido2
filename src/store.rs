@@ -10,11 +10,16 @@ use color_eyre::{
     eyre::{WrapErr, eyre},
 };
 use hmac::{Hmac, KeyInit, Mac};
+use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use sqlx::{
     Row, SqlitePool,
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
 };
+
+use base64::Engine as _;
+use p256::PublicKey;
+use p256::elliptic_curve::sec1::ToSec1Point;
 
 use crate::tpm::RecoveryKdf;
 
@@ -79,56 +84,113 @@ pub struct StoredTpmKey {
     pub auth_value: Option<Vec<u8>>,
 }
 
-fn recovery_kdf_from_database(
-    algorithm: &str,
-    memory_kib: Option<i64>,
-    iterations: Option<i64>,
-    parallelism: Option<i64>,
-) -> Result<RecoveryKdf> {
-    let to_u32 = |name: &str, value: i64| {
-        u32::try_from(value).wrap_err_with(|| format!("invalid recovery KDF {name}: {value}"))
-    };
-
-    match algorithm {
-        "pbkdf2-sha256" => Ok(RecoveryKdf::Pbkdf2Sha256 {
-            iterations: to_u32("iterations", iterations.unwrap_or(600_000))?,
-        }),
-        "argon2id" => Ok(RecoveryKdf::Argon2id {
-            memory_kib: to_u32(
-                "memory_kib",
-                memory_kib.ok_or_else(|| eyre!("Argon2id recovery KDF missing memory_kib"))?,
-            )?,
-            iterations: to_u32(
-                "iterations",
-                iterations.ok_or_else(|| eyre!("Argon2id recovery KDF missing iterations"))?,
-            )?,
-            parallelism: to_u32(
-                "parallelism",
-                parallelism.ok_or_else(|| eyre!("Argon2id recovery KDF missing parallelism"))?,
-            )?,
-        }),
-        unknown => Err(eyre!("unsupported recovery KDF algorithm: {unknown}")),
-    }
+fn sec1_encode_point(x: &[u8], y: &[u8]) -> String {
+    let mut encoded = vec![0x04u8];
+    encoded.extend_from_slice(x);
+    encoded.extend_from_slice(y);
+    PublicKey::from_sec1_bytes(&encoded)
+        .expect("valid P-256 SEC.1 point")
+        .to_string()
 }
 
-fn recovery_kdf_database_values(
-    kdf: &RecoveryKdf,
-) -> (&'static str, Option<i64>, i64, Option<i64>) {
-    match kdf {
-        RecoveryKdf::Pbkdf2Sha256 { iterations } => {
-            ("pbkdf2-sha256", None, i64::from(*iterations), None)
-        }
+fn sec1_decode_point(data: &str) -> Result<(Vec<u8>, Vec<u8>)> {
+    let pk: PublicKey = data
+        .parse()
+        .map_err(|e| eyre!("invalid PEM public key: {e}"))?;
+    let point = pk.to_sec1_point(false);
+    let x: &[u8] = point.x().ok_or_else(|| eyre!("SEC.1 point missing x"))?;
+    let y: &[u8] = point.y().ok_or_else(|| eyre!("SEC.1 point missing y"))?;
+    Ok((x.to_vec(), y.to_vec()))
+}
+
+#[derive(Serialize, Deserialize)]
+struct TpmKeyBlob {
+    private: Vec<u8>,
+    public: Vec<u8>,
+    auth_value: Option<Vec<u8>>,
+}
+
+fn tpm_key_to_blob(key: &StoredTpmKey) -> Vec<u8> {
+    let blob = TpmKeyBlob {
+        private: key.private.clone(),
+        public: key.public.clone(),
+        auth_value: key.auth_value.clone(),
+    };
+    let mut buf = Vec::new();
+    ciborium::into_writer(&blob, &mut buf).expect("serializing TPM key blob");
+    buf
+}
+
+fn tpm_key_from_blob(data: &[u8], public_key: &str) -> Result<StoredTpmKey> {
+    let blob: TpmKeyBlob = ciborium::from_reader(data).wrap_err("deserializing TPM key blob")?;
+    let (public_key_x, public_key_y) =
+        sec1_decode_point(public_key).wrap_err("decoding SEC.1 public key point")?;
+    Ok(StoredTpmKey {
+        private: blob.private,
+        public: blob.public,
+        public_key_x,
+        public_key_y,
+        auth_value: blob.auth_value,
+    })
+}
+
+fn kdf_params_to_string(kdf: &RecoveryKdf, salt: &[u8], hash: &[u8]) -> String {
+    use argon2::password_hash::{Ident, Output, ParamsString, PasswordHash, Salt};
+    let salt_b64 = base64::engine::general_purpose::STANDARD_NO_PAD.encode(salt);
+    let mut params = ParamsString::new();
+    match *kdf {
         RecoveryKdf::Argon2id {
             memory_kib,
             iterations,
             parallelism,
-        } => (
-            "argon2id",
-            Some(i64::from(*memory_kib)),
-            i64::from(*iterations),
-            Some(i64::from(*parallelism)),
-        ),
+        } => {
+            params.add_decimal("m", memory_kib).expect("adding m");
+            params.add_decimal("t", iterations).expect("adding t");
+            params.add_decimal("p", parallelism).expect("adding p");
+        }
     }
+    let ph = PasswordHash {
+        algorithm: Ident::new("argon2id").expect("valid algorithm"),
+        version: Some(19),
+        params,
+        salt: Some(Salt::from_b64(&salt_b64).expect("valid salt base64")),
+        hash: Some(Output::new(hash).expect("valid hash length")),
+    };
+    ph.to_string()
+}
+
+fn kdf_params_from_string(s: &str) -> Result<(Vec<u8>, Vec<u8>, RecoveryKdf)> {
+    use argon2::password_hash::PasswordHash;
+    let ph = PasswordHash::new(s).map_err(|e| eyre!("invalid KDF params PHC string: {e}"))?;
+    if ph.algorithm.as_str() != "argon2id" {
+        return Err(eyre!("unsupported KDF algorithm: {}", ph.algorithm));
+    }
+    let salt = ph.salt.ok_or_else(|| eyre!("PHC string missing salt"))?;
+    let hash = ph.hash.ok_or_else(|| eyre!("PHC string missing hash"))?;
+    let mut salt_buf = vec![0u8; 64];
+    let salt_bytes = salt
+        .decode_b64(&mut salt_buf)
+        .map_err(|e| eyre!("decoding PHC salt from B64: {e}"))?;
+    let salt_vec = salt_bytes.to_vec();
+    let memory_kib = ph
+        .params
+        .get_decimal("m")
+        .ok_or_else(|| eyre!("missing argon2id m parameter"))?;
+    let iterations = ph
+        .params
+        .get_decimal("t")
+        .ok_or_else(|| eyre!("missing argon2id t parameter"))?;
+    let parallelism = ph
+        .params
+        .get_decimal("p")
+        .ok_or_else(|| eyre!("missing argon2id p parameter"))?;
+    let hash_bytes: &[u8] = hash.as_ref();
+    let kdf = RecoveryKdf::Argon2id {
+        memory_kib,
+        iterations,
+        parallelism,
+    };
+    Ok((salt_vec, hash_bytes.to_vec(), kdf))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -286,15 +348,10 @@ async fn load_ctap2_credentials_async(
         "SELECT m.credential_id, m.rp_id, m.discoverable, m.user_id, m.user_handle, m.user_name, m.user_display_name, \
                 m.sign_count, m.integrity_mac, \
                  p.policy_selection, p.policy_digest, p.policy_ref, p.authority_name, p.authority_signature, p.policy_version, \
-                p.tpm_private AS primary_tpm_private, p.tpm_public AS primary_tpm_public, \
-                p.public_key_x AS primary_public_key_x, p.public_key_y AS primary_public_key_y, \
-                p.tpm_auth_value AS primary_tpm_auth_value, \
+                p.tpm_key AS primary_tpm_key, p.public_key AS primary_public_key, \
                 r.slot_label AS recovery_label, \
-                r.tpm_private AS recovery_tpm_private, r.tpm_public AS recovery_tpm_public, \
-                r.public_key_x AS recovery_public_key_x, r.public_key_y AS recovery_public_key_y, \
-                r.tpm_auth_value AS recovery_tpm_auth_value, \
-                 t.passphrase_salt, t.passphrase_hash, t.kdf_algorithm, t.kdf_memory_kib, \
-                 t.kdf_iterations, t.kdf_parallelism \
+                r.tpm_key AS recovery_tpm_key, r.public_key AS recovery_public_key, \
+                 t.kdf_params \
          FROM credential_metadata m \
          JOIN credential_keyslots p \
            ON p.credential_id = m.credential_id AND p.slot_kind = 'primary' \
@@ -323,20 +380,35 @@ async fn load_ctap2_credentials_async(
                 .try_into()
                 .wrap_err("invalid policy_version")?;
             let recovery_label: Option<String> = row.try_get("recovery_label")?;
-            let recovery_passphrase_salt: Option<Vec<u8>> = row.try_get("passphrase_salt")?;
-            let recovery_passphrase_hash: Option<Vec<u8>> = row.try_get("passphrase_hash")?;
-            let recovery_kdf_algorithm: Option<String> = row.try_get("kdf_algorithm")?;
-            let recovery_kdf_memory_kib: Option<i64> = row.try_get("kdf_memory_kib")?;
-            let recovery_kdf_iterations: Option<i64> = row.try_get("kdf_iterations")?;
-            let recovery_kdf_parallelism: Option<i64> = row.try_get("kdf_parallelism")?;
-            let recovery_private: Option<Vec<u8>> = row.try_get("recovery_tpm_private")?;
-            let recovery_public: Option<Vec<u8>> = row.try_get("recovery_tpm_public")?;
-            let recovery_public_key_x: Option<Vec<u8>> = row.try_get("recovery_public_key_x")?;
-            let recovery_public_key_y: Option<Vec<u8>> = row.try_get("recovery_public_key_y")?;
-            let primary_tpm_auth_value: Option<Vec<u8>> = row.try_get("primary_tpm_auth_value")?;
-            let recovery_tpm_auth_value: Option<Vec<u8>> =
-                row.try_get("recovery_tpm_auth_value")?;
+            let primary_tpm_key: Vec<u8> = row.try_get("primary_tpm_key")?;
+            let primary_public_key: String = row.try_get("primary_public_key")?;
+            let recovery_tpm_key: Option<Vec<u8>> = row.try_get("recovery_tpm_key")?;
+            let recovery_public_key: Option<String> = row.try_get("recovery_public_key")?;
+            let recovery_kdf_params: Option<String> = row.try_get("kdf_params")?;
             let integrity_mac: Option<Vec<u8>> = row.try_get("integrity_mac")?;
+
+            let primary_key = tpm_key_from_blob(&primary_tpm_key, &primary_public_key)?;
+
+            let recovery = match (
+                recovery_label,
+                recovery_tpm_key,
+                recovery_public_key,
+                recovery_kdf_params,
+            ) {
+                (label, Some(tpm_key_data), Some(pub_key_data), Some(kdf_data)) => {
+                    let (passphrase_salt, passphrase_hash, kdf) =
+                        kdf_params_from_string(&kdf_data)?;
+                    let key = tpm_key_from_blob(&tpm_key_data, &pub_key_data)?;
+                    Some(StoredRecoverySlot {
+                        label,
+                        passphrase_salt,
+                        passphrase_hash,
+                        kdf,
+                        key,
+                    })
+                }
+                _ => None,
+            };
 
             let stored = StoredCtap2Credential {
                 id: row.try_get("credential_id")?,
@@ -353,13 +425,7 @@ async fn load_ctap2_credentials_async(
                 user_handle: row.try_get("user_handle")?,
                 user_name: row.try_get("user_name")?,
                 user_display_name: row.try_get("user_display_name")?,
-                key: StoredTpmKey {
-                    private: row.try_get("primary_tpm_private")?,
-                    public: row.try_get("primary_tpm_public")?,
-                    public_key_x: row.try_get("primary_public_key_x")?,
-                    public_key_y: row.try_get("primary_public_key_y")?,
-                    auth_value: primary_tpm_auth_value,
-                },
+                key: primary_key,
                 policy: match (policy_selection, policy_digest) {
                     (Some(selection), Some(digest)) => Some(StoredPcrPolicy {
                         selection,
@@ -371,45 +437,7 @@ async fn load_ctap2_credentials_async(
                     }),
                     _ => None,
                 },
-                recovery: match (
-                    recovery_label,
-                    recovery_passphrase_salt,
-                    recovery_passphrase_hash,
-                    recovery_kdf_algorithm,
-                    recovery_private,
-                    recovery_public,
-                    recovery_public_key_x,
-                    recovery_public_key_y,
-                ) {
-                    (
-                        label,
-                        Some(passphrase_salt),
-                        Some(passphrase_hash),
-                        Some(kdf_algorithm),
-                        Some(private),
-                        Some(public),
-                        Some(public_key_x),
-                        Some(public_key_y),
-                    ) => Some(StoredRecoverySlot {
-                        label,
-                        passphrase_salt,
-                        passphrase_hash,
-                        kdf: recovery_kdf_from_database(
-                            &kdf_algorithm,
-                            recovery_kdf_memory_kib,
-                            recovery_kdf_iterations,
-                            recovery_kdf_parallelism,
-                        )?,
-                        key: StoredTpmKey {
-                            private,
-                            public,
-                            public_key_x,
-                            public_key_y,
-                            auth_value: recovery_tpm_auth_value,
-                        },
-                    }),
-                    _ => None,
-                },
+                recovery,
                 sign_count: u32::try_from(sign_count)
                     .wrap_err_with(|| format!("invalid sign_count {}", sign_count))?,
                 integrity_mac,
@@ -486,68 +514,57 @@ async fn save_ctap2_credentials_async(
         .await
         .wrap_err_with(|| format!("saving credential metadata for rp_id={}", credential.rp_id))?;
 
-        sqlx::query!(
+        let primary_tpm_key_blob = tpm_key_to_blob(&credential.key);
+        let primary_public_key_blob =
+            sec1_encode_point(&credential.key.public_key_x, &credential.key.public_key_y);
+        sqlx::query(
             "INSERT INTO credential_keyslots \
-             (credential_id, slot_kind, slot_label, policy_selection, policy_digest, policy_ref, authority_name, authority_signature, policy_version, tpm_private, tpm_public, public_key_x, public_key_y, tpm_auth_value) \
-             VALUES (?1, 'primary', NULL, ?2, ?3, ?4, ?5, ?6, 1, ?7, ?8, ?9, ?10, ?11)",
-            &credential.id,
-            credential.policy.as_ref().map(|policy| policy.selection.as_str()),
-            credential.policy.as_ref().map(|policy| policy.digest.as_slice()),
-            credential
-                .policy
-                .as_ref()
-                .and_then(|policy| policy.policy_ref.as_deref()),
-            credential
-                .policy
-                .as_ref()
-                .and_then(|policy| policy.authority_name.as_deref()),
-            credential
-                .policy
-                .as_ref()
-                .and_then(|policy| policy.authority_signature.as_deref()),
-            &credential.key.private,
-            &credential.key.public,
-            &credential.key.public_key_x,
-            &credential.key.public_key_y,
-            credential.key.auth_value.as_deref(),
+             (credential_id, slot_kind, slot_label, policy_selection, policy_digest, policy_ref, authority_name, authority_signature, policy_version, tpm_key, public_key) \
+             VALUES (?1, 'primary', NULL, ?2, ?3, ?4, ?5, ?6, 1, ?7, ?8)",
         )
+        .bind(&credential.id)
+        .bind(credential.policy.as_ref().map(|policy| policy.selection.as_str()))
+        .bind(credential.policy.as_ref().map(|policy| policy.digest.as_slice()))
+        .bind(credential.policy.as_ref().and_then(|policy| policy.policy_ref.as_deref()))
+        .bind(credential.policy.as_ref().and_then(|policy| policy.authority_name.as_deref()))
+        .bind(credential.policy.as_ref().and_then(|policy| policy.authority_signature.as_deref()))
+        .bind(primary_tpm_key_blob)
+        .bind(primary_public_key_blob)
         .execute(&mut *tx)
         .await
         .wrap_err_with(|| format!("saving primary keyslot for rp_id={}", credential.rp_id))?;
 
         if let Some(recovery) = &credential.recovery {
-            let recovery_keyslot = sqlx::query!(
+            let recovery_tpm_key_blob = tpm_key_to_blob(&recovery.key);
+            let recovery_public_key_blob =
+                sec1_encode_point(&recovery.key.public_key_x, &recovery.key.public_key_y);
+            let recovery_keyslot_id = sqlx::query(
                 "INSERT INTO credential_keyslots \
-                 (credential_id, slot_kind, slot_label, policy_selection, policy_digest, tpm_private, tpm_public, public_key_x, public_key_y, tpm_auth_value) \
-                 VALUES (?1, 'recovery', ?2, NULL, NULL, ?3, ?4, ?5, ?6, ?7)",
-                &credential.id,
-                recovery.label.as_deref(),
-                &recovery.key.private,
-                &recovery.key.public,
-                &recovery.key.public_key_x,
-                &recovery.key.public_key_y,
-                recovery.key.auth_value.as_deref(),
+                 (credential_id, slot_kind, slot_label, policy_selection, policy_digest, tpm_key, public_key) \
+                 VALUES (?1, 'recovery', ?2, NULL, NULL, ?3, ?4)",
             )
+            .bind(&credential.id)
+            .bind(recovery.label.as_deref())
+            .bind(recovery_tpm_key_blob)
+            .bind(recovery_public_key_blob)
             .execute(&mut *tx)
             .await
-            .wrap_err_with(|| format!("saving recovery keyslot for rp_id={}", credential.rp_id))?;
+            .wrap_err_with(|| format!("saving recovery keyslot for rp_id={}", credential.rp_id))?
+            .last_insert_rowid();
 
-            let (kdf_algorithm, kdf_memory_kib, kdf_iterations, kdf_parallelism) =
-                recovery_kdf_database_values(&recovery.kdf);
+            let kdf_params = kdf_params_to_string(
+                &recovery.kdf,
+                &recovery.passphrase_salt,
+                &recovery.passphrase_hash,
+            );
             sqlx::query(
                 "INSERT INTO credential_tokens \
-                 (keyslot_id, token_type, label, passphrase_salt, passphrase_hash, \
-                  kdf_algorithm, kdf_memory_kib, kdf_iterations, kdf_parallelism) \
-                 VALUES (?1, 'passphrase', ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                 (keyslot_id, token_type, label, kdf_params) \
+                 VALUES (?1, 'passphrase', ?2, ?3)",
             )
-            .bind(recovery_keyslot.last_insert_rowid())
-            .bind(recovery.label.as_deref())
-            .bind(recovery.passphrase_salt.as_slice())
-            .bind(recovery.passphrase_hash.as_slice())
-            .bind(kdf_algorithm)
-            .bind(kdf_memory_kib)
-            .bind(kdf_iterations)
-            .bind(kdf_parallelism)
+            .bind(recovery_keyslot_id)
+            .bind(recovery.label.clone())
+            .bind(kdf_params)
             .execute(&mut *tx)
             .await
             .wrap_err_with(|| format!("saving recovery token for rp_id={}", credential.rp_id))?;
@@ -634,17 +651,39 @@ async fn update_recovery_slot_async(
         .await
         .wrap_err("beginning transaction for recovery slot update")?;
 
+    let row = sqlx::query(
+        "SELECT tpm_key, public_key FROM credential_keyslots \
+         WHERE credential_id = ?1 AND slot_kind = 'recovery'",
+    )
+    .bind(credential_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .wrap_err("reading recovery keyslot for update")?
+    .ok_or_else(|| eyre!("recovery keyslot not found"))?;
+
+    let old_tpm_key: Vec<u8> = row.try_get("tpm_key")?;
+    let old_public_key: String = row.try_get("public_key")?;
+    let old_key = tpm_key_from_blob(&old_tpm_key, &old_public_key)?;
+
+    let new_key = StoredTpmKey {
+        private: new_private.to_vec(),
+        public: old_key.public,
+        public_key_x: old_key.public_key_x,
+        public_key_y: old_key.public_key_y,
+        auth_value: Some(new_hash.to_vec()),
+    };
+    let new_tpm_key_blob = tpm_key_to_blob(&new_key);
+
     let result = sqlx::query(
         "UPDATE credential_keyslots \
-         SET tpm_private = ?1, tpm_auth_value = ?2, updated_at = CURRENT_TIMESTAMP \
-         WHERE credential_id = ?3 AND slot_kind = 'recovery'",
+         SET tpm_key = ?1, updated_at = CURRENT_TIMESTAMP \
+         WHERE credential_id = ?2 AND slot_kind = 'recovery'",
     )
-    .bind(new_private)
-    .bind(new_hash)
+    .bind(new_tpm_key_blob)
     .bind(credential_id)
     .execute(&mut *tx)
     .await
-    .wrap_err("updating recovery keyslot private blob")?;
+    .wrap_err("updating recovery keyslot TPM key")?;
 
     if result.rows_affected() != 1 {
         return Err(eyre!(
@@ -654,23 +693,15 @@ async fn update_recovery_slot_async(
         ));
     }
 
-    let (kdf_algorithm, kdf_memory_kib, kdf_iterations, kdf_parallelism) =
-        recovery_kdf_database_values(kdf);
+    let kdf_params = kdf_params_to_string(kdf, new_salt, new_hash);
     sqlx::query(
         "UPDATE credential_tokens \
-          SET passphrase_salt = ?1, passphrase_hash = ?2, kdf_algorithm = ?3, \
-              kdf_memory_kib = ?4, kdf_iterations = ?5, kdf_parallelism = ?6, \
-              updated_at = CURRENT_TIMESTAMP \
+          SET kdf_params = ?1, updated_at = CURRENT_TIMESTAMP \
           WHERE keyslot_id = (SELECT keyslot_id FROM credential_keyslots \
-                              WHERE credential_id = ?7 AND slot_kind = 'recovery') \
+                              WHERE credential_id = ?2 AND slot_kind = 'recovery') \
            AND token_type = 'passphrase'",
     )
-    .bind(new_salt)
-    .bind(new_hash)
-    .bind(kdf_algorithm)
-    .bind(kdf_memory_kib)
-    .bind(kdf_iterations)
-    .bind(kdf_parallelism)
+    .bind(kdf_params)
     .bind(credential_id)
     .execute(&mut *tx)
     .await
@@ -898,6 +929,41 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
+    fn point_1() -> (Vec<u8>, Vec<u8>) {
+        let sk = p256::SecretKey::from_slice(&[1u8; 32]).expect("valid secret key");
+        let pk = sk.public_key();
+        let point = pk.to_sec1_point(false);
+        (point.x().unwrap().to_vec(), point.y().unwrap().to_vec())
+    }
+
+    fn point_2() -> (Vec<u8>, Vec<u8>) {
+        let sk = p256::SecretKey::from_slice(&[2u8; 32]).expect("valid secret key");
+        let pk = sk.public_key();
+        let point = pk.to_sec1_point(false);
+        (point.x().unwrap().to_vec(), point.y().unwrap().to_vec())
+    }
+
+    fn point_3() -> (Vec<u8>, Vec<u8>) {
+        let sk = p256::SecretKey::from_slice(&[3u8; 32]).expect("valid secret key");
+        let pk = sk.public_key();
+        let point = pk.to_sec1_point(false);
+        (point.x().unwrap().to_vec(), point.y().unwrap().to_vec())
+    }
+
+    fn point_4() -> (Vec<u8>, Vec<u8>) {
+        let sk = p256::SecretKey::from_slice(&[4u8; 32]).expect("valid secret key");
+        let pk = sk.public_key();
+        let point = pk.to_sec1_point(false);
+        (point.x().unwrap().to_vec(), point.y().unwrap().to_vec())
+    }
+
+    fn point_5() -> (Vec<u8>, Vec<u8>) {
+        let sk = p256::SecretKey::from_slice(&[5u8; 32]).expect("valid secret key");
+        let pk = sk.public_key();
+        let point = pk.to_sec1_point(false);
+        (point.x().unwrap().to_vec(), point.y().unwrap().to_vec())
+    }
+
     #[test]
     fn missing_store_loads_empty_credentials() {
         let dir = test_store_dir("missing");
@@ -921,8 +987,8 @@ mod tests {
             key: StoredTpmKey {
                 private: vec![9, 10],
                 public: vec![11, 12],
-                public_key_x: vec![13; 32],
-                public_key_y: vec![14; 32],
+                public_key_x: point_1().0,
+                public_key_y: point_1().1,
                 auth_value: None,
             },
             policy: Some(StoredPcrPolicy {
@@ -937,12 +1003,12 @@ mod tests {
                 label: Some("backup".to_owned()),
                 passphrase_salt: vec![16; 32],
                 passphrase_hash: vec![17; 32],
-                kdf: RecoveryKdf::legacy_pbkdf2(),
+                kdf: RecoveryKdf::argon2id_default(),
                 key: StoredTpmKey {
                     private: vec![18, 19],
                     public: vec![20, 21],
-                    public_key_x: vec![22; 32],
-                    public_key_y: vec![23; 32],
+                    public_key_x: point_2().0,
+                    public_key_y: point_2().1,
                     auth_value: None,
                 },
             }),
@@ -980,8 +1046,8 @@ mod tests {
             key: StoredTpmKey {
                 private: vec![1],
                 public: vec![2],
-                public_key_x: vec![3; 32],
-                public_key_y: vec![4; 32],
+                public_key_x: point_3().0,
+                public_key_y: point_3().1,
                 auth_value: None,
             },
             policy: None,
@@ -1000,8 +1066,8 @@ mod tests {
             key: StoredTpmKey {
                 private: vec![5],
                 public: vec![6],
-                public_key_x: vec![7; 32],
-                public_key_y: vec![8; 32],
+                public_key_x: point_4().0,
+                public_key_y: point_4().1,
                 auth_value: None,
             },
             policy: None,
@@ -1075,12 +1141,12 @@ mod tests {
             label: Some("recovery".to_owned()),
             passphrase_salt: vec![1; 32],
             passphrase_hash: vec![2; 32],
-            kdf: RecoveryKdf::legacy_pbkdf2(),
+            kdf: RecoveryKdf::argon2id_default(),
             key: StoredTpmKey {
                 private: vec![3],
                 public: vec![4],
-                public_key_x: vec![5; 32],
-                public_key_y: vec![6; 32],
+                public_key_x: point_5().0,
+                public_key_y: point_5().1,
                 auth_value: Some(vec![2; 32]),
             },
         });
@@ -1129,8 +1195,8 @@ mod tests {
             key: StoredTpmKey {
                 private: vec![5],
                 public: vec![6],
-                public_key_x: vec![7; 32],
-                public_key_y: vec![8; 32],
+                public_key_x: point_4().0,
+                public_key_y: point_4().1,
                 auth_value: None,
             },
             policy: None,

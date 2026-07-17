@@ -2243,6 +2243,7 @@ pub fn change_recovery_passphrase(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use p256::elliptic_curve::sec1::ToSec1Point;
 
     fn ensure_auto_approve() {
         static INIT: std::sync::Once = std::sync::Once::new();
@@ -2958,8 +2959,16 @@ mod tests {
         sign_count: u32,
     }
 
+    fn test_point() -> (Vec<u8>, Vec<u8>) {
+        let sk = p256::SecretKey::from_slice(&[0xabu8; 32]).expect("valid secret key");
+        let pk = sk.public_key();
+        let point = pk.to_sec1_point(false);
+        (point.x().unwrap().to_vec(), point.y().unwrap().to_vec())
+    }
+
     fn test_credential(id: Vec<u8>, rp_id: &str, sign_count: u32) -> StoredCredentialTest {
         let user_suffix = id.first().copied().unwrap_or_default();
+        let (x, y) = test_point();
         StoredCredentialTest {
             id,
             user_handle: vec![5, 6, 7, 8],
@@ -2968,8 +2977,8 @@ mod tests {
             key: tpm::TpmCredential {
                 private: vec![9],
                 public: vec![10],
-                public_key_x: vec![11; 32],
-                public_key_y: vec![12; 32],
+                public_key_x: x,
+                public_key_y: y,
                 auth_value: None,
             },
             sign_count,
