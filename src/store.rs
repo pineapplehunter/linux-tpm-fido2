@@ -351,9 +351,7 @@ pub fn save_daemon_passphrase_to_dir(
     block_on_store(save_daemon_passphrase_async(dir.as_ref(), salt, hash, kdf))
 }
 
-async fn load_daemon_passphrase_async(
-    dir: &Path,
-) -> Result<Option<DaemonPassphraseData>> {
+async fn load_daemon_passphrase_async(dir: &Path) -> Result<Option<DaemonPassphraseData>> {
     let pool = open_database(dir).await?;
     let row = sqlx::query("SELECT value FROM daemon_config WHERE key = 'daemon_passphrase'")
         .fetch_optional(&pool)
