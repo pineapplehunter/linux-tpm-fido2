@@ -10,6 +10,7 @@
 - CTAP2 request handling accepts `credProps` and `residentKey` browser request shapes.
 - CTAP2 makeCredential also accepts the attestation conveyance preference shape.
 - Approval prompts now include peer process PID, UID, and GID in addition to session identity.
+- Use the agents directory for temporary files for keeping track of tasks. Only put small texts in the directory.
 
 ## Project Direction
 

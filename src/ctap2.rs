@@ -1285,7 +1285,7 @@ fn get_info_response(client_pin: bool) -> Vec<u8> {
                 (Value::Text("plat".to_owned()), Value::Bool(false)),
                 (Value::Text("rk".to_owned()), Value::Bool(true)),
                 (Value::Text("up".to_owned()), Value::Bool(true)),
-                (Value::Text("uv".to_owned()), Value::Bool(true)),
+                (Value::Text("uv".to_owned()), Value::Bool(false)),
                 (Value::Text("clientPin".to_owned()), Value::Bool(client_pin)),
                 (Value::Text("credMgmt".to_owned()), Value::Bool(true)),
             ]),
@@ -1553,8 +1553,10 @@ fn validate_common_options(
     }
     if map_bool(options, "up") == Some(false) {
         log::info!("request disables user presence");
-        if reject_user_presence_false {
-            log::info!("request disables user presence, which is not supported");
+        if reject_user_presence_false && map_bool(options, "uv") != Some(true) {
+            log::info!(
+                "request disables user presence without user verification, which is not supported"
+            );
             return Err(ErrorStatus::UnsupportedOption);
         }
     }
@@ -2324,10 +2326,22 @@ mod tests {
     }
 
     #[test]
-    fn options_reject_disabled_user_presence() {
+    fn options_reject_disabled_user_presence_without_uv() {
         assert_eq!(
             validate_make_credential_options(Some(&options_map(&[("up", false)]))),
             Err(ErrorStatus::UnsupportedOption)
+        );
+    }
+
+    #[test]
+    fn options_accept_disabled_user_presence_with_uv() {
+        assert_eq!(
+            validate_make_credential_options(Some(&options_map(&[("up", false), ("uv", true)]))),
+            Ok(())
+        );
+        assert_eq!(
+            validate_get_assertion_options(Some(&options_map(&[("up", false), ("uv", true)]))),
+            Ok(())
         );
     }
 
