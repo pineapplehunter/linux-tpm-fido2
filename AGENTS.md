@@ -94,6 +94,51 @@ makeCredential `pinUvAuthParam` HMAC message = `clientDataHash || rpId` and the
 token must be scoped to `Some(rp_id)`; getAssertion message = `clientDataHash`.
 Regression test: `make_credential_with_pin_uv_auth_token_regression`.
 
+### CTAP2 command enumeration (CTAP 2.2 §6 Authenticator API)
+
+Enumerated against the spec; current status in `src/ctap2.rs`:
+
+| Command | Code | Status |
+| --- | --- | --- |
+| authenticatorMakeCredential | 0x01 | Implemented |
+| authenticatorGetAssertion | 0x02 | Implemented |
+| authenticatorGetNextAssertion | 0x08 | Implemented (stateful) |
+| authenticatorGetInfo | 0x04 | Implemented |
+| authenticatorClientPIN | 0x06 | Implemented (sub 1,2,3,4,6,9,10) |
+| authenticatorCredentialManagement | 0x0A | Implemented (sub 1-7) + preview 0x41 |
+| authenticatorReset | 0x07 | Implemented (deletes credentials + PIN after approval) |
+| authenticatorSelection | 0x0B | Implemented (returns empty success after approval) |
+| authenticatorBioEnrollment | 0x09 | `todo!()` — no built-in biometric UV method |
+| authenticatorLargeBlobs | 0x0C | `todo!()` — large blob storage not implemented |
+| authenticatorConfig | 0x0D | `todo!()` — enterprise attestation / alwaysUv / minPINLength |
+| authenticatorBioEnrollmentPreview | 0x40 | aliases BioEnrollment (`todo!()`) |
+
+CTAPHID mandatory commands (§11.2.9.1: MSG, CBOR, INIT, PING, CANCEL, ERROR,
+KEEPALIVE) are handled in `src/ctaphid.rs`. WINK/LOCK are optional.
+
+### Correctness issues found during CTAP2 review
+
+- **getAssertion UP flag is hardcoded.** `make_auth_data` is called with a
+  fixed `0x01` UP bit in `get_assertion` (`src/ctap2.rs:~555`), so pre-flight
+  assertions requested with `up=false` still report UP=1. Per §6.2.2 the UP bit
+  MUST be 0 when user presence was not requested. `make_credential` likewise
+  hardcodes UP (acceptable there since approval grants presence, but the
+  `up` option is not validated for CTAP2.0 `up=false` rejection).
+- **getInfo `uv` option is `false` while `pinUvAuthToken` is `true`.** Spec
+  §6.4 requires `pinUvAuthToken: true` ⟺ (`clientPin: true` OR `uv: true`).
+  This passes only because `clientPin` may be true; it is inconsistent for the
+  no-PIN case. Consider advertising `uv: true` (PIN-based UV is a form of UV)
+  or gating `pinUvAuthToken` on `clientPin.is_some()`.
+- **`makeCredUvNotRqd` is not advertised.** A CTAP2.1 authenticator that
+  supports clientPIN but does not require UV for non-discoverable credentials
+  SHOULD advertise `makeCredUvNotRqd: true` (§6.4, §9). Not currently sent.
+- **`getInfo` version list / extensions.** `versions` advertises
+  `["FIDO_2_1","FIDO_2_0"]`; `extensions` only lists `credProps`. hmac-secret,
+  credBlob, largeBlobKey, minPinLength are not implemented/advertised.
+- **Reset/BioEnrollment/LargeBlobs/Config** were missing entirely from the
+  command enum until added with `todo!()` (non-trivial ones) and real
+  implementations (Reset, Selection).
+
 ### Debug logging in TPM operations
 
 The file `src/tpm.rs` contains several `log::debug!` calls that trace

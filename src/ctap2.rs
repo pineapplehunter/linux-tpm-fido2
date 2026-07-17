@@ -46,7 +46,14 @@ pub enum Ctap2Command {
     GetInfo = 0x04,
     ClientPin = 0x06,
     GetNextAssertion = 0x08,
+    Reset = 0x07,
     CredentialManagement = 0x0a,
+    Selection = 0x0b,
+    BioEnrollment = 0x09,
+    LargeBlobs = 0x0c,
+    Config = 0x0d,
+    BioEnrollmentPreview = 0x40,
+    CredentialManagementPreview = 0x41,
 }
 
 #[derive(Debug)]
@@ -69,8 +76,15 @@ impl TryFrom<u8> for Ctap2Command {
             0x02 => Self::GetAssertion,
             0x04 => Self::GetInfo,
             0x06 => Self::ClientPin,
+            0x07 => Self::Reset,
             0x08 => Self::GetNextAssertion,
+            0x09 => Self::BioEnrollment,
             0x0a => Self::CredentialManagement,
+            0x0b => Self::Selection,
+            0x0c => Self::LargeBlobs,
+            0x0d => Self::Config,
+            0x40 => Self::BioEnrollmentPreview,
+            0x41 => Self::CredentialManagementPreview,
             _ => return Err(UnknownCtapCommandError),
         })
     }
@@ -288,7 +302,16 @@ impl Authenticator {
             Ctap2Command::MakeCredential => self.make_credential(body),
             Ctap2Command::GetAssertion => self.get_assertion(body),
             Ctap2Command::GetNextAssertion => self.get_next_assertion(body),
-            Ctap2Command::CredentialManagement => self.credential_management(body),
+            Ctap2Command::CredentialManagement | Ctap2Command::CredentialManagementPreview => {
+                self.credential_management(body)
+            }
+            Ctap2Command::Reset => self.reset(),
+            Ctap2Command::Selection => self.selection(),
+            Ctap2Command::BioEnrollment | Ctap2Command::BioEnrollmentPreview => {
+                self.bio_enrollment(body)
+            }
+            Ctap2Command::LargeBlobs => self.large_blobs(body),
+            Ctap2Command::Config => self.config(body),
         } {
             Ok(response) => response,
             Err(status) => error_response(status),
@@ -300,6 +323,59 @@ impl Authenticator {
         self.management = None;
         self.pin_uv_auth_token = None;
         self.key_agreement = None;
+    }
+
+    /// authenticatorReset (0x07): factory-resets the authenticator, deleting all
+    /// credentials and clearing the configured PIN. CTAP2.2 §6.6 requires user
+    /// presence (and, when set, alwaysUv) before performing the reset.
+    fn reset(&mut self) -> Result<Vec<u8>, ErrorStatus> {
+        if !self.assertion_approved("reset") {
+            return Err(ErrorStatus::OperationDenied);
+        }
+        if !self.client_pin.is_none() {
+            let _ = store::delete_client_pin_state_from_dir(&self.store_dir);
+            self.client_pin = None;
+            self.key_agreement = None;
+            self.pin_uv_auth_token = None;
+        }
+        for credential in &self.credentials {
+            let _ = store::delete_ctap2_credential_from_dir(&self.store_dir, &credential.id);
+        }
+        self.credentials.clear();
+        self.pending_assertion = None;
+        self.management = None;
+        Ok(encode_response(Value::Map(Vec::new())))
+    }
+
+    /// authenticatorSelection (0x11/0x0B): returns an empty success response once
+    /// the user has given consent. CTAP2.2 §6.9. The actual user gesture is
+    /// collected by the transport/UI; here we just confirm approval.
+    fn selection(&mut self) -> Result<Vec<u8>, ErrorStatus> {
+        if !self.assertion_approved("selection") {
+            return Err(ErrorStatus::OperationDenied);
+        }
+        Ok(encode_response(Value::Map(Vec::new())))
+    }
+
+    /// authenticatorBioEnrollment (0x09): biometric enrollment management.
+    /// This authenticator has no built-in biometric user verification method,
+    /// so the command is not supported. CTAP2.2 §6.7.
+    fn bio_enrollment(&mut self, _body: &[u8]) -> Result<Vec<u8>, ErrorStatus> {
+        todo!(
+            "authenticatorBioEnrollment (0x09) is not supported: this authenticator has no built-in biometric user verification method"
+        )
+    }
+
+    /// authenticatorLargeBlobs (0x0C): large blob storage (credBlob / largeBlob
+    /// extensions). Not yet implemented. CTAP2.2 §6.10.
+    fn large_blobs(&mut self, _body: &[u8]) -> Result<Vec<u8>, ErrorStatus> {
+        todo!("authenticatorLargeBlobs (0x0C) is not implemented")
+    }
+
+    /// authenticatorConfig (0x0D): authenticator configuration (enterprise
+    /// attestation, alwaysUv, minPINLength). Not yet implemented. CTAP2.2 §6.11.
+    fn config(&mut self, _body: &[u8]) -> Result<Vec<u8>, ErrorStatus> {
+        todo!("authenticatorConfig (0x0D) is not implemented")
     }
 
     fn make_credential(&mut self, body: &[u8]) -> Result<Vec<u8>, ErrorStatus> {
@@ -1483,7 +1559,16 @@ pub fn command_name(command: Ctap2Command) -> &'static str {
         Ctap2Command::GetNextAssertion => "authenticatorGetNextAssertion",
         Ctap2Command::GetInfo => "authenticatorGetInfo",
         Ctap2Command::ClientPin => "authenticatorClientPIN",
-        Ctap2Command::CredentialManagement => "authenticatorCredentialManagement",
+        Ctap2Command::CredentialManagement | Ctap2Command::CredentialManagementPreview => {
+            "authenticatorCredentialManagement"
+        }
+        Ctap2Command::Reset => "authenticatorReset",
+        Ctap2Command::Selection => "authenticatorSelection",
+        Ctap2Command::BioEnrollment | Ctap2Command::BioEnrollmentPreview => {
+            "authenticatorBioEnrollment"
+        }
+        Ctap2Command::LargeBlobs => "authenticatorLargeBlobs",
+        Ctap2Command::Config => "authenticatorConfig",
     }
 }
 

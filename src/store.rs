@@ -290,6 +290,10 @@ pub fn save_client_pin_state_to_dir(
     block_on_store(save_client_pin_state_async(dir.as_ref(), state))
 }
 
+pub fn delete_client_pin_state_from_dir(dir: impl AsRef<Path>) -> Result<()> {
+    block_on_store(delete_client_pin_state_async(dir.as_ref()))
+}
+
 pub fn credentials_database_path_in_dir(dir: impl AsRef<Path>) -> PathBuf {
     dir.as_ref().join(CREDENTIALS_DATABASE_FILE)
 }
@@ -872,6 +876,15 @@ async fn save_client_pin_state_async(dir: &Path, state: &StoredClientPinState) -
     .await
     .wrap_err("saving clientPIN state")?;
 
+    Ok(())
+}
+
+async fn delete_client_pin_state_async(dir: &Path) -> Result<()> {
+    let pool = open_database(dir).await?;
+    sqlx::query("DELETE FROM client_pin_state WHERE state_id = 1")
+        .execute(&pool)
+        .await
+        .wrap_err("deleting clientPIN state")?;
     Ok(())
 }
 
