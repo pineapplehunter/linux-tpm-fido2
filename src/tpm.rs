@@ -4,7 +4,10 @@ use std::{
 };
 
 use argon2::{Algorithm, Argon2, Params, Version};
-use color_eyre::{Result, eyre::WrapErr};
+use color_eyre::{
+    Result,
+    eyre::{WrapErr, eyre},
+};
 use pbkdf2::pbkdf2_hmac;
 use sha2::{Digest as ShaDigest, Sha256};
 use tss_esapi::{
@@ -154,16 +157,23 @@ impl Drop for PolicySessionGuard {
 
 pub struct Tpm {
     context: Context,
+    pcr_selection_list: PcrSelectionList,
+    pcr_selection_name: String,
 }
 
 impl Tpm {
-    pub fn open(path: &Path) -> Result<Self> {
+    pub fn open(path: &Path, pcr_indices: Option<&[u32]>) -> Result<Self> {
         let tcti = format!("device:{}", path.display())
             .parse::<TctiNameConf>()
             .wrap_err_with(|| format!("creating TPM TCTI config for {}", path.display()))?;
         let context = Context::new(tcti)
             .wrap_err_with(|| format!("opening TPM ESAPI context for {}", path.display()))?;
-        Ok(Self { context })
+        let (pcr_selection_list, pcr_selection_name) = default_pcr_selection(pcr_indices)?;
+        Ok(Self {
+            context,
+            pcr_selection_list,
+            pcr_selection_name,
+        })
     }
 
     pub fn probe(&mut self) -> Result<()> {
@@ -258,7 +268,7 @@ impl Tpm {
     }
 
     pub fn create_secure_boot_policy(&mut self) -> Result<PcrPolicyBinding> {
-        let selection_list = secure_boot_pcr_selection_list()?;
+        let selection_list = self.pcr_selection_list.clone();
         let current_digest = self.current_pcr_digest(&selection_list)?;
         let trial_session = self
             .context
@@ -278,11 +288,16 @@ impl Tpm {
             selection_list,
         )?;
         let policy_digest = self.context.policy_get_digest(trial_session)?;
+        log::debug!(
+            "create_secure_boot_policy: pcr_digest={} policy_digest={}",
+            hex::encode(&current_digest),
+            hex::encode(policy_digest.value()),
+        );
         self.context
             .flush_context(SessionHandle::from(trial_session).into())?;
 
         Ok(PcrPolicyBinding {
-            selection: secure_boot_pcr_selection_name(),
+            selection: self.pcr_selection_name.clone(),
             digest: policy_digest.value().to_vec(),
             policy_ref: None,
             authority_name: None,
@@ -386,7 +401,7 @@ impl Tpm {
         );
         self.context.flush_context(parent.into())?;
 
-        let selection = secure_boot_pcr_selection_list()?;
+        let selection = self.pcr_selection_list.clone();
         let current_digest = self.current_pcr_digest(&selection)?;
         let session = self
             .context
@@ -431,7 +446,7 @@ impl Tpm {
         authority_name: &[u8],
         policy_ref: &[u8],
     ) -> Result<PcrPolicyBinding> {
-        let selection = secure_boot_pcr_selection_list()?;
+        let selection = self.pcr_selection_list.clone();
         let current_digest = self.current_pcr_digest(&selection)?;
         let trial_session = self
             .context
@@ -527,7 +542,7 @@ impl Tpm {
             .wrap_err("marshalling updated PCR policy signature")?;
 
         Ok(PcrPolicyBinding {
-            selection: secure_boot_pcr_selection_name(),
+            selection: self.pcr_selection_name.clone(),
             digest: final_digest.value().to_vec(),
             policy_ref: Some(policy_ref.to_vec()),
             authority_name: Some(authority_name.to_vec()),
@@ -559,6 +574,12 @@ impl Tpm {
             .wrap_err("building TPM credential private blob")?;
         let public = Public::unmarshall(&credential.public)
             .wrap_err("unmarshalling TPM credential public blob")?;
+        log::debug!(
+            "sign_digest_with_policy: policy={:?} authority={:?} stored_digest={}",
+            policy.is_some(),
+            authority.is_some(),
+            policy.map(|p| hex::encode(&p.digest)).unwrap_or_default(),
+        );
         let key_handle = self
             .context
             .execute_with_nullauth_session(|context| context.load(parent, private, public))
@@ -588,7 +609,7 @@ impl Tpm {
             policy.and_then(|policy| policy.authority_name.as_ref()),
             policy.and_then(|policy| policy.authority_signature.as_ref()),
         ) {
-            let selection_list = secure_boot_pcr_selection_list()?;
+            let selection_list = self.pcr_selection_list.clone();
             let current_digest = self.current_pcr_digest(&selection_list)?;
             let policy_session = self
                 .context
@@ -682,8 +703,12 @@ impl Tpm {
                     )
                 })
         } else if policy.is_some() {
-            let selection_list = secure_boot_pcr_selection_list()?;
+            let selection_list = self.pcr_selection_list.clone();
             let current_digest = self.current_pcr_digest(&selection_list)?;
+            log::debug!(
+                "assertion policy path: pcr_digest={}",
+                hex::encode(&current_digest),
+            );
             let policy_session = self
                 .context
                 .start_auth_session(
@@ -705,15 +730,19 @@ impl Tpm {
                 Digest::try_from(current_digest)?,
                 selection_list,
             )?;
-            self.context
-                .execute_with_session(Some(AuthSession::from(policy_session)), |context| {
+            let sign_result = self.context.execute_with_session(
+                Some(AuthSession::from(policy_session)),
+                |context| {
                     context.sign(
                         key_handle,
                         digest.clone(),
                         SignatureScheme::Null,
                         validation.try_into()?,
                     )
-                })
+                },
+            );
+            log::debug!("assertion policy path: sign result={sign_result:?}");
+            sign_result
         } else {
             self.context.execute_with_nullauth_session(|context| {
                 context.sign(
@@ -784,7 +813,17 @@ impl Tpm {
         for digest in digest_list.value() {
             hasher.update(digest.value());
         }
-        Ok(hasher.finalize().to_vec())
+        let combined = hasher.finalize().to_vec();
+        log::debug!(
+            "current_pcr_digest: selection={:?} n_digests={} combined={}",
+            selection_list,
+            digest_list.value().len(),
+            hex::encode(&combined),
+        );
+        for (i, d) in digest_list.value().iter().enumerate() {
+            log::debug!("  digest[{}] = {}", i, hex::encode(d.value()));
+        }
+        Ok(combined)
     }
 
     fn probe_ecc_signing(&mut self) -> Result<()> {
@@ -879,15 +918,26 @@ fn signing_key_public(policy: Option<&PcrPolicyBinding>, user_with_auth: bool) -
         .wrap_err("building TPM ECC signing-key template")
 }
 
-fn secure_boot_pcr_selection_list() -> Result<PcrSelectionList> {
-    PcrSelectionListBuilder::new()
-        .with_selection(HashingAlgorithm::Sha256, &[PcrSlot::Slot7])
+fn default_pcr_selection(pcr_indices: Option<&[u32]>) -> Result<(PcrSelectionList, String)> {
+    let indices = pcr_indices.unwrap_or(&[7]);
+    let slots: Result<Vec<PcrSlot>> = indices
+        .iter()
+        .map(|&i| PcrSlot::try_from(1u32 << i).map_err(|_| eyre!("invalid PCR index {}", i)))
+        .collect();
+    let slots = slots?;
+    let name = format!(
+        "sha256:{}",
+        indices
+            .iter()
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let selection = PcrSelectionListBuilder::new()
+        .with_selection(HashingAlgorithm::Sha256, &slots)
         .build()
-        .wrap_err("building secure boot PCR selection list")
-}
-
-fn secure_boot_pcr_selection_name() -> String {
-    "sha256:7".to_owned()
+        .wrap_err("building PCR selection list")?;
+    Ok((selection, name))
 }
 
 const RECOVERY_PBKDF2_ITERATIONS: u32 = 600_000;

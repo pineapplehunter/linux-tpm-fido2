@@ -1,71 +1,119 @@
-use std::{env, path::PathBuf, thread, time::Duration};
+use std::{
+    env, path::PathBuf, sync::Arc, sync::atomic::AtomicBool, sync::mpsc, thread, time::Duration,
+};
 
-use clap::Parser;
-use color_eyre::{Result, eyre::WrapErr};
-use linux_tpm_fido2::{ctap2, ctaphid, hid, session, store, tpm};
+use clap::{Parser, Subcommand};
+use color_eyre::{
+    Result,
+    eyre::{WrapErr, bail, eyre},
+};
+use linux_tpm_fido2::{ctaphid, hid, management, session, store, tpm};
+use rpassword::prompt_password;
 use uhid_virt::{OutputEvent, StreamError, UHIDDevice};
+
+#[derive(Debug, Parser)]
+#[command(
+    version,
+    about = "Linux TPM-backed FIDO2/WebAuthn authenticator daemon"
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Run the UHID FIDO2 daemon with management socket
+    Daemon(DaemonArgs),
+    /// List credentials from the running daemon
+    ListCredentials,
+    /// Change the recovery passphrase for all credentials via the daemon
+    UpdatePassphrase,
+    /// Re-sign PCR policy for all credentials using current PCR values
+    UpdatePcrReference,
+    /// Update PCR policy with a new PCR selection
+    UpdatePcrPolicy(PcrPolicyArgs),
+    /// Set the default PCR policy for newly created credentials
+    SetDefaultPcrPolicy(DefaultPcrPolicyArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct DaemonArgs {
+    /// Path to the Linux UHID character device
+    #[arg(long, default_value = "/dev/uhid")]
+    uhid_path: PathBuf,
+
+    /// Path to the TPM resource-manager device
+    #[arg(long, default_value = "/dev/tpmrm0")]
+    tpm_path: PathBuf,
+
+    /// Directory for development TPM-backed credentials
+    #[arg(long, default_value = store::DEV_STORE_DIR)]
+    store_dir: PathBuf,
+
+    /// Do not open UHID or TPM devices; only print resolved configuration
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(Debug, clap::Args)]
+struct PcrPolicyArgs {
+    /// PCR indices to bind (repeatable, e.g. --pcr 1 --pcr 7)
+    #[arg(long, short)]
+    pcr: Vec<u32>,
+
+    /// Apply to all credentials instead of listing specific IDs
+    #[arg(long)]
+    all: bool,
+
+    /// Credential IDs (hex) to update
+    credential_ids: Vec<String>,
+}
+
+#[derive(Debug, clap::Args)]
+struct DefaultPcrPolicyArgs {
+    /// PCR indices for the default policy (e.g. 1 7)
+    pcr_indices: Vec<u32>,
+}
 
 fn main() -> Result<()> {
     color_eyre::install()?;
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    let config = Config::parse();
+    let cli = Cli::parse();
 
-    let store_dir = absolute_path(&config.store_dir);
-
-    if config.list_credentials {
-        for credential in store::load_ctap2_credentials_from_dir(&store_dir, None)? {
-            println!(
-                "{}\t{}\t{}",
-                hex::encode(credential.id),
-                credential.rp_id,
-                credential.user_name.as_deref().unwrap_or("")
-            );
-        }
-        return Ok(());
+    match cli.command {
+        Command::Daemon(args) => run_daemon(args),
+        Command::ListCredentials => run_list_credentials(),
+        Command::UpdatePassphrase => run_update_passphrase(),
+        Command::UpdatePcrReference => run_update_pcr_reference(),
+        Command::UpdatePcrPolicy(args) => run_update_pcr_policy(args),
+        Command::SetDefaultPcrPolicy(args) => run_set_default_pcr_policy(args),
     }
+}
 
-    if let Some(credential_id_hex) = &config.update_pcr_policy {
-        let credential_id = hex::decode(credential_id_hex)
-            .wrap_err_with(|| format!("invalid hex credential ID: {credential_id_hex}"))?;
-        let recovery_passphrase =
-            env::var("LINUX_TPM_FIDO2_RECOVERY_PASSPHRASE").map_err(|_| {
-                color_eyre::eyre::eyre!("LINUX_TPM_FIDO2_RECOVERY_PASSPHRASE must be set")
-            })?;
-        return ctap2::update_pcr_policy_for_credential(
-            &store_dir,
-            Some(&config.tpm_path),
-            &credential_id,
-            &recovery_passphrase,
-        );
+fn absolute_path(path: &PathBuf) -> PathBuf {
+    if path.is_absolute() {
+        path.clone()
+    } else {
+        env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
     }
+}
 
-    if let Some(credential_id_hex) = &config.change_recovery_passphrase {
-        let credential_id = hex::decode(credential_id_hex)
-            .wrap_err_with(|| format!("invalid hex credential ID: {credential_id_hex}"))?;
-        let old_passphrase = env::var("LINUX_TPM_FIDO2_RECOVERY_PASSPHRASE").map_err(|_| {
-            color_eyre::eyre::eyre!("LINUX_TPM_FIDO2_RECOVERY_PASSPHRASE must be set")
-        })?;
-        let new_passphrase = env::var("LINUX_TPM_FIDO2_NEW_RECOVERY_PASSPHRASE").map_err(|_| {
-            color_eyre::eyre::eyre!("LINUX_TPM_FIDO2_NEW_RECOVERY_PASSPHRASE must be set")
-        })?;
-        return ctap2::change_recovery_passphrase(
-            &store_dir,
-            Some(&config.tpm_path),
-            &credential_id,
-            &old_passphrase,
-            &new_passphrase,
-        );
-    }
+fn run_daemon(args: DaemonArgs) -> Result<()> {
+    let store_dir = absolute_path(&args.store_dir);
 
     log::info!("linux-tpm-fido2 starting");
-    log::info!("uhid path: {}", config.uhid_path.display());
-    log::info!("tpm path: {}", config.tpm_path.display());
+    log::info!("uhid path: {}", args.uhid_path.display());
+    log::info!("tpm path: {}", args.tpm_path.display());
     log::info!("dev store: {}", store_dir.display());
     log::info!(
         "credential database: {}",
         store::credentials_database_path_in_dir(&store_dir).display()
     );
+
     let session = session::SessionContext::detect();
     log::info!("session model: {}", session.describe());
 
@@ -78,26 +126,57 @@ fn main() -> Result<()> {
         log::warn!("═══════════════════════════════════════════════════════");
     }
 
-    if config.dry_run {
+    if args.dry_run {
         log::info!("dry run: not opening UHID or TPM devices");
         return Ok(());
     }
 
-    if let Err(error) = tpm::check_device(&config.tpm_path) {
+    if let Err(error) = tpm::check_device(&args.tpm_path) {
         log::warn!(
             "warning: TPM device {} is not accessible yet: {error}",
-            config.tpm_path.display()
+            args.tpm_path.display()
         );
     } else {
         log::info!("TPM device is accessible");
     }
 
-    let mut device = UHIDDevice::create_with_path(hid::create_params(), &config.uhid_path)
-        .wrap_err_with(|| format!("opening UHID device {}", config.uhid_path.display()))?;
+    // Start management socket server in a background thread.
+    // The TPM command channel allows the management thread to ask the main
+    // daemon thread to perform TPM operations (e.g. update-pcr-reference)
+    // since the TPM device cannot be opened by two threads simultaneously.
+    let mgmt_stop = Arc::new(AtomicBool::new(false));
+    let mgmt_store_dir = store_dir.clone();
+    let (tpm_cmd_tx, tpm_cmd_rx) = mpsc::channel::<(
+        linux_tpm_fido2::ctap2::TpmCommand,
+        mpsc::Sender<linux_tpm_fido2::ctap2::TpmCmdResult>,
+    )>();
+    let _mgmt_handle = {
+        let stop = mgmt_stop.clone();
+        let tpm_cmd_tx = tpm_cmd_tx.clone();
+        thread::spawn(move || {
+            if let Err(e) = management::serve(mgmt_store_dir, Some(tpm_cmd_tx), stop) {
+                log::error!("management server failed: {e}");
+            }
+        })
+    };
+
+    let mut device = UHIDDevice::create_with_path(hid::create_params(), &args.uhid_path)
+        .wrap_err_with(|| format!("opening UHID device {}", args.uhid_path.display()))?;
     log::info!("created virtual FIDO HID device; waiting for host reports");
-    let mut ctaphid = ctaphid::PacketHandler::new(store_dir, Some(config.tpm_path.clone()));
+    let mut ctaphid = ctaphid::PacketHandler::new(store_dir, Some(args.tpm_path.clone()));
 
     loop {
+        // Process any pending TPM commands from the management thread.
+        if let Ok((command, resp_tx)) = tpm_cmd_rx.try_recv() {
+            log::debug!("processing TPM command from management thread");
+            let result = ctaphid
+                .handle_tpm_command(command)
+                .map_err(|e| format!("{e}"));
+            if resp_tx.send(result).is_err() {
+                log::warn!("management thread dropped response channel");
+            }
+        }
+
         match device.read() {
             Ok(OutputEvent::Output { data }) => {
                 let Some((report, has_report_id_prefix)) = normalize_host_report(&data) else {
@@ -174,52 +253,119 @@ fn main() -> Result<()> {
     }
 }
 
-#[derive(Debug, Parser)]
-#[command(
-    version,
-    about = "Linux TPM-backed FIDO2/WebAuthn authenticator daemon"
-)]
-struct Config {
-    /// Do not open UHID or TPM devices; only print resolved configuration.
-    #[arg(long)]
-    dry_run: bool,
-
-    /// Path to the Linux UHID character device.
-    #[arg(long, default_value = "/dev/uhid")]
-    uhid_path: PathBuf,
-
-    /// Path to the TPM resource-manager device.
-    #[arg(long, default_value = "/dev/tpmrm0")]
-    tpm_path: PathBuf,
-
-    /// Directory for development TPM-backed credentials.
-    #[arg(long, default_value = store::DEV_STORE_DIR)]
-    store_dir: PathBuf,
-
-    /// List credential IDs, relying-party IDs, and user names, then exit.
-    #[arg(long)]
-    list_credentials: bool,
-
-    /// Update PCR policy for a credential (hex ID) using recovery passphrase
-    /// from LINUX_TPM_FIDO2_RECOVERY_PASSPHRASE, then exit.
-    #[arg(long)]
-    update_pcr_policy: Option<String>,
-
-    /// Change recovery passphrase for a credential (hex ID).
-    /// Old passphrase from LINUX_TPM_FIDO2_RECOVERY_PASSPHRASE,
-    /// new passphrase from LINUX_TPM_FIDO2_NEW_RECOVERY_PASSPHRASE, then exit.
-    #[arg(long)]
-    change_recovery_passphrase: Option<String>,
+fn run_list_credentials() -> Result<()> {
+    let request = management::ManagementRequest::ListCredentials;
+    let response = management::send_request(&request)?;
+    if !response.ok {
+        bail!("daemon error: {}", response.error.unwrap_or_default());
+    }
+    if let Some(result) = &response.result
+        && let Some(credentials) = result.get("credentials").and_then(|v| v.as_array())
+    {
+        for cred in credentials {
+            let id = cred["id"].as_str().unwrap_or("");
+            let rp_id = cred["rp_id"].as_str().unwrap_or("");
+            let user_name = cred["user_name"].as_str().unwrap_or("");
+            println!("{id}\t{rp_id}\t{user_name}");
+        }
+    }
+    Ok(())
 }
 
-fn absolute_path(path: &PathBuf) -> PathBuf {
-    if path.is_absolute() {
-        path.clone()
-    } else {
-        env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(path)
+fn run_update_passphrase() -> Result<()> {
+    let old = prompt_password_confirm("Enter current recovery passphrase: ")?;
+    let new = prompt_password_confirm("Enter new recovery passphrase: ")?;
+    let request = management::ManagementRequest::UpdatePassphrase {
+        old_passphrase: old,
+        new_passphrase: new,
+    };
+    let response = management::send_request(&request)?;
+    if !response.ok {
+        bail!("daemon error: {}", response.error.unwrap_or_default());
     }
+    if let Some(result) = &response.result
+        && let Some(results) = result.get("results").and_then(|v| v.as_array())
+    {
+        for r in results {
+            let id = r["credential"].as_str().unwrap_or("?");
+            let status = r["status"].as_str().unwrap_or("?");
+            println!("{id}\t{status}");
+        }
+    }
+    Ok(())
+}
+
+fn run_update_pcr_reference() -> Result<()> {
+    let passphrase = prompt_password_confirm("Enter recovery passphrase: ")?;
+    let request = management::ManagementRequest::UpdatePcrReference { passphrase };
+    let response = management::send_request(&request)?;
+    if !response.ok {
+        bail!("daemon error: {}", response.error.unwrap_or_default());
+    }
+    if let Some(result) = &response.result
+        && let Some(results) = result.get("results").and_then(|v| v.as_array())
+    {
+        for r in results {
+            let id = r["credential"].as_str().unwrap_or("?");
+            let status = r["status"].as_str().unwrap_or("?");
+            println!("{id}\t{status}");
+        }
+    }
+    Ok(())
+}
+
+fn run_update_pcr_policy(args: PcrPolicyArgs) -> Result<()> {
+    if args.pcr.is_empty() {
+        bail!("at least one --pcr index is required");
+    }
+    let passphrase = prompt_password_confirm("Enter recovery passphrase: ")?;
+
+    let credential_target = if args.all {
+        management::CredentialTarget::All { all: true }
+    } else {
+        management::CredentialTarget::Ids {
+            credential_ids: args.credential_ids,
+        }
+    };
+
+    let request = management::ManagementRequest::UpdatePcrPolicy {
+        passphrase,
+        pcr_indices: args.pcr,
+        credential_target,
+    };
+    let response = management::send_request(&request)?;
+    if !response.ok {
+        bail!("daemon error: {}", response.error.unwrap_or_default());
+    }
+    if let Some(result) = &response.result
+        && let Some(results) = result.get("results").and_then(|v| v.as_array())
+    {
+        for r in results {
+            let id = r["credential"].as_str().unwrap_or("?");
+            let status = r["status"].as_str().unwrap_or("?");
+            println!("{id}\t{status}");
+        }
+    }
+    Ok(())
+}
+
+fn run_set_default_pcr_policy(args: DefaultPcrPolicyArgs) -> Result<()> {
+    let pcr_indices = args.pcr_indices.clone();
+    let request = management::ManagementRequest::SetDefaultPcrPolicy { pcr_indices };
+    let response = management::send_request(&request)?;
+    if !response.ok {
+        bail!("daemon error: {}", response.error.unwrap_or_default());
+    }
+    println!("default PCR policy set to {:?}", args.pcr_indices);
+    Ok(())
+}
+
+fn prompt_password_confirm(prompt: &str) -> Result<String> {
+    let pw = prompt_password(prompt).map_err(|e| eyre!("reading passphrase: {e}"))?;
+    if pw.is_empty() {
+        bail!("passphrase must not be empty");
+    }
+    Ok(pw)
 }
 
 fn normalize_host_report(data: &[u8]) -> Option<(&[u8], bool)> {

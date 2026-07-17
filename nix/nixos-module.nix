@@ -59,13 +59,15 @@ in
       path = [ cfg.package ];
 
       script = ''
-        linux-tpm-fido2 --store-dir "$STATE_DIRECTORY" --tpm-path "${cfg.tpmPath}" --uhid-path "${cfg.uhidPath}"
+        linux-tpm-fido2 daemon --store-dir /var/lib/linux-tpm-fido2 --tpm-path "${cfg.tpmPath}" --uhid-path "${cfg.uhidPath}"
       '';
 
       serviceConfig = {
         Type = "simple";
         StateDirectory = "linux-tpm-fido2";
         StateDirectoryMode = "0700";
+        RuntimeDirectory = "linux-tpm-fido2";
+        RuntimeDirectoryMode = "0700";
         Restart = "on-failure";
         RestartSec = 2;
         NoNewPrivileges = true;

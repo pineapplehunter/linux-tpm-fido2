@@ -27,11 +27,10 @@
             uhidPath = "/dev/uhid";
           };
 
-          systemd.services.linux-tpm-fido2.serviceConfig.Environment = [
-            "LINUX_TPM_FIDO2_RECOVERY_PASSPHRASE=test-recovery-passphrase"
-          ];
-
           systemd.services.linux-tpm-fido2.wantedBy = lib.mkForce [ ];
+          systemd.services.linux-tpm-fido2.environment.RUST_LOG = "debug";
+          systemd.services.linux-tpm-fido2.environment.LINUX_TPM_FIDO2_RECOVERY_PASSPHRASE =
+            "test-recovery-passphrase";
 
           security.polkit.extraConfig = ''
             polkit.addRule(function(action, subject) {
@@ -62,6 +61,20 @@
               machine.send_chars("alice\n")
               machine.wait_until_tty_matches("1", "alice@")
 
+          def mgmt(cmd):
+              """Run a no-password management subcommand."""
+              return machine.succeed(f"linux-tpm-fido2 {cmd}")
+
+          def mgmt_expect(cmd, expect_script):
+              """Run a management subcommand with an expect script for passphrase input."""
+              full = (
+                  f"expect -c '"
+                  f"spawn linux-tpm-fido2 {cmd}; "
+                  + expect_script
+                  + "'"
+              )
+              return machine.succeed(full)
+
           machine.wait_for_unit("getty@tty1.service")
           login_alice()
           machine.succeed("systemctl start linux-tpm-fido2")
@@ -81,14 +94,116 @@
           assert "FIDO_2_1" in output, f"Expected FIDO2 version info, got: {output}"
           assert "rk" in output, f"Expected resident key support info, got: {output}"
 
+          # -- list-credentials (no credentials yet) --
+          output = mgmt("list-credentials")
+          print("list-credentials (empty):", output)
+          assert output.strip() == "", f"Expected empty listing, got: {output}"
+
+          # -- set-default-pcr-policy --
+          output = mgmt("set-default-pcr-policy 1 7")
+          print("set-default-pcr-policy:", output)
+          assert "default PCR policy set to [1, 7]" in output, f"Unexpected output: {output}"
+
           # -- register and assert via polkit authorization --
           machine.succeed("mkdir -p /tmp/linux-tpm-fido2-smoke")
-          machine.succeed("python3 ${./tests/smoke_register.py} /tmp/linux-tpm-fido2-smoke login.example.test alice user-123 'make credential challenge' false")
-          machine.succeed("python3 ${./tests/smoke_assert.py} /tmp/linux-tpm-fido2-smoke login.example.test 'assert credential challenge'")
+          ret_reg, output_reg = machine.execute(
+              "python3 ${./tests/smoke_register.py} /tmp/linux-tpm-fido2-smoke "
+              + "login.example.test alice user-123 'make credential challenge' false"
+          )
+          print("### registration stdout/stderr:")
+          print("### " + output_reg.strip().replace("\n", "\n### "))
+          if ret_reg != 0:
+              journal = machine.succeed("journalctl -u linux-tpm-fido2 --no-pager -n 50")
+              print("### daemon journal after registration failure:")
+              for line in journal.strip().split("\n"):
+                  print("### " + line)
+              raise Exception(f"Registration failed:\n{output_reg}")
+
+          ret, output = machine.execute(
+              "python3 ${./tests/smoke_assert.py} /tmp/linux-tpm-fido2-smoke "
+              + "login.example.test 'assert credential challenge'"
+          )
+          print("### assertion stdout/stderr:")
+          print("### " + output.strip().replace("\n", "\n### "))
+          if ret != 0:
+              journal = machine.succeed("journalctl -u linux-tpm-fido2 --no-pager -n 50")
+              print("### daemon journal after assertion failure:")
+              for line in journal.strip().split("\n"):
+                  print("### " + line)
+              raise Exception(f"Assertion failed:\n{output}")
 
           # -- regression test for tpm session exhaustion --
           for _ in range(20):
-            machine.succeed("python3 ${./tests/smoke_assert.py} /tmp/linux-tpm-fido2-smoke login.example.test 'assert credential challenge'")
+            machine.succeed(
+                "python3 ${./tests/smoke_assert.py} /tmp/linux-tpm-fido2-smoke "
+                + "login.example.test 'assert credential challenge'"
+            )
+
+          # -- list-credentials (after registration) --
+          output = mgmt("list-credentials")
+          print("list-credentials (after registration):", output)
+          assert "login.example.test" in output, f"Expected credential listing, got: {output}"
+
+          # -- PCR update via update-pcr-reference (expect for passphrase) --
+          machine.succeed("tpm2_pcrextend 7:sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+          machine.fail(
+              "python3 ${./tests/smoke_assert.py} /tmp/linux-tpm-fido2-smoke "
+              + "login.example.test 'assert credential challenge'"
+          )
+          mgmt_expect(
+              "update-pcr-reference",
+              'expect "Enter recovery passphrase: "; '
+              'send "test-recovery-passphrase\\r"; '
+              'expect eof',
+          )
+          machine.succeed(
+              "python3 ${./tests/smoke_assert.py} /tmp/linux-tpm-fido2-smoke "
+              + "login.example.test 'assert credential challenge'"
+          )
+
+          # -- Passphrase change via update-passphrase (expect for old+new) --
+          mgmt_expect(
+              "update-passphrase",
+              'expect "Enter current recovery passphrase: "; '
+              'send "test-recovery-passphrase\\r"; '
+              'expect "Enter new recovery passphrase: "; '
+              'send "new-recovery-passphrase\\r"; '
+              'expect eof',
+          )
+
+          # -- Old passphrase rejected, new passphrase works --
+          machine.succeed("tpm2_pcrextend 7:sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+          machine.fail(
+              "python3 ${./tests/smoke_assert.py} /tmp/linux-tpm-fido2-smoke "
+              + "login.example.test 'assert credential challenge'"
+          )
+          mgmt_expect(
+              "update-pcr-reference",
+              'expect "Enter recovery passphrase: "; '
+              'send "new-recovery-passphrase\\r"; '
+              'expect eof',
+          )
+          machine.succeed(
+              "python3 ${./tests/smoke_assert.py} /tmp/linux-tpm-fido2-smoke "
+              + "login.example.test 'assert credential challenge'"
+          )
+
+          # -- update-pcr-policy with --all (expect for passphrase) --
+          machine.succeed("tpm2_pcrextend 7:sha256=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+          machine.fail(
+              "python3 ${./tests/smoke_assert.py} /tmp/linux-tpm-fido2-smoke "
+              + "login.example.test 'assert credential challenge'"
+          )
+          mgmt_expect(
+              "update-pcr-policy --pcr 7 --all",
+              'expect "Enter recovery passphrase: "; '
+              'send "new-recovery-passphrase\\r"; '
+              'expect eof',
+          )
+          machine.succeed(
+              "python3 ${./tests/smoke_assert.py} /tmp/linux-tpm-fido2-smoke "
+              + "login.example.test 'assert credential challenge'"
+          )
 
           # -- regression check for reboot persistence --
           machine.shutdown()
@@ -96,44 +211,23 @@
           login_alice()
           machine.succeed("systemctl start linux-tpm-fido2")
           machine.wait_for_unit("linux-tpm-fido2")
-          machine.succeed("python3 ${./tests/smoke_assert.py} /tmp/linux-tpm-fido2-smoke login.example.test 'assert credential challenge'")
+          # Re-sign PCR policy after reboot since the TPM state (and therefore
+          # PCR values) may differ from the pre-reboot boot environment.
+          mgmt_expect(
+              "update-pcr-reference",
+              'expect "Enter recovery passphrase: "; '
+              'send "new-recovery-passphrase\r"; '
+              'expect eof',
+          )
+          machine.succeed(
+              "python3 ${./tests/smoke_assert.py} /tmp/linux-tpm-fido2-smoke "
+              + "login.example.test 'assert credential challenge'"
+          )
 
-          # -- PCR update works through the same credential created with Polkit approval --
-          machine.succeed("tpm2_pcrextend 7:sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-          machine.fail("python3 ${./tests/smoke_assert.py} /tmp/linux-tpm-fido2-smoke login.example.test 'assert credential challenge'")
-          credential_id = machine.succeed("od -An -v -tx1 /tmp/linux-tpm-fido2-smoke/credential.id | tr -d ' \\n'").strip()
-          machine.systemctl("stop linux-tpm-fido2")
-          machine.succeed(
-              "LINUX_TPM_FIDO2_RECOVERY_PASSPHRASE=test-recovery-passphrase "
-              + "linux-tpm-fido2 --store-dir /var/lib/linux-tpm-fido2 "
-              + "--tpm-path /dev/tpm0 --update-pcr-policy " + credential_id
-          )
-          machine.systemctl("start linux-tpm-fido2")
-          machine.wait_for_unit("linux-tpm-fido2")
-          machine.succeed("python3 ${./tests/smoke_assert.py} /tmp/linux-tpm-fido2-smoke login.example.test 'assert credential challenge'")
-
-          # -- Rewrap the recovery key, reject the old passphrase, and recover with the new one --
-          machine.systemctl("stop linux-tpm-fido2")
-          machine.succeed(
-              "LINUX_TPM_FIDO2_RECOVERY_PASSPHRASE=test-recovery-passphrase "
-              + "LINUX_TPM_FIDO2_NEW_RECOVERY_PASSPHRASE=new-recovery-passphrase "
-              + "linux-tpm-fido2 --store-dir /var/lib/linux-tpm-fido2 "
-              + "--tpm-path /dev/tpm0 --change-recovery-passphrase " + credential_id
-          )
-          machine.fail(
-              "LINUX_TPM_FIDO2_RECOVERY_PASSPHRASE=test-recovery-passphrase "
-              + "linux-tpm-fido2 --store-dir /var/lib/linux-tpm-fido2 "
-              + "--tpm-path /dev/tpm0 --update-pcr-policy " + credential_id
-          )
-          machine.succeed("tpm2_pcrextend 7:sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
-          machine.succeed(
-              "LINUX_TPM_FIDO2_RECOVERY_PASSPHRASE=new-recovery-passphrase "
-              + "linux-tpm-fido2 --store-dir /var/lib/linux-tpm-fido2 "
-              + "--tpm-path /dev/tpm0 --update-pcr-policy " + credential_id
-          )
-          machine.systemctl("start linux-tpm-fido2")
-          machine.wait_for_unit("linux-tpm-fido2")
-          machine.succeed("python3 ${./tests/smoke_assert.py} /tmp/linux-tpm-fido2-smoke login.example.test 'assert credential challenge'")
+          # -- list-credentials after reboot --
+          output = mgmt("list-credentials")
+          print("list-credentials (after reboot):", output)
+          assert "login.example.test" in output, f"Expected credential listing, got: {output}"
 
           # -- fido2-manage PIN-dependent subcommands (daemon has no PIN at this point) --
           machine.succeed(

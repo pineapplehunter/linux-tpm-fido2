@@ -2,6 +2,7 @@ pub mod approval;
 pub mod ctap2;
 pub mod ctaphid;
 pub mod hid;
+pub mod management;
 pub mod polkit;
 pub mod session;
 pub mod store;

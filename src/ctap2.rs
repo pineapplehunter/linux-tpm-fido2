@@ -1,6 +1,7 @@
 use std::{
     env,
     path::PathBuf,
+    sync::mpsc,
     thread,
     time::{Duration, Instant},
 };
@@ -64,15 +65,15 @@ impl TryFrom<u8> for Ctap2Command {
     type Error = UnknownCtapCommandError;
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
-        match value {
-            0x01 => Ok(Self::MakeCredential),
-            0x02 => Ok(Self::GetAssertion),
-            0x04 => Ok(Self::GetInfo),
-            0x06 => Ok(Self::ClientPin),
-            0x08 => Ok(Self::GetNextAssertion),
-            0x0a => Ok(Self::CredentialManagement),
-            _ => Err(UnknownCtapCommandError),
-        }
+        Ok(match value {
+            0x01 => Self::MakeCredential,
+            0x02 => Self::GetAssertion,
+            0x04 => Self::GetInfo,
+            0x06 => Self::ClientPin,
+            0x08 => Self::GetNextAssertion,
+            0x0a => Self::CredentialManagement,
+            _ => return Err(UnknownCtapCommandError),
+        })
     }
 }
 
@@ -177,34 +178,7 @@ impl Authenticator {
     pub fn new(store_dir: PathBuf, tpm_path: Option<PathBuf>) -> Self {
         let session = session::SessionContext::detect();
         let tpm = None;
-        let credentials = match store::load_ctap2_credentials_from_dir(&store_dir, session.uid) {
-            Ok(credentials) => credentials
-                .into_iter()
-                .map(|credential| Credential {
-                    id: credential.id,
-                    rp_id: credential.rp_id,
-                    discoverable: credential.discoverable,
-                    user_id: credential.user_id,
-                    user_handle: credential.user_handle,
-                    user_name: credential.user_name,
-                    user_display_name: credential.user_display_name,
-                    key: tpm::TpmCredential {
-                        private: credential.key.private,
-                        public: credential.key.public,
-                        public_key_x: credential.key.public_key_x,
-                        public_key_y: credential.key.public_key_y,
-                        auth_value: credential.key.auth_value,
-                    },
-                    policy: credential.policy,
-                    recovery: credential.recovery,
-                    sign_count: credential.sign_count,
-                })
-                .collect(),
-            Err(error) => {
-                log::warn!("failed to load CTAP2 credential store: {error:?}");
-                Vec::new()
-            }
-        };
+        let credentials = Self::load_credentials_from_disk(&store_dir, session.uid);
         log::info!("loaded {} TPM-backed CTAP2 credentials", credentials.len());
         let client_pin = match store::load_client_pin_state_from_dir(&store_dir) {
             Ok(Some(state)) => Some(ClientPinState {
@@ -230,6 +204,37 @@ impl Authenticator {
             key_agreement: None,
             pin_uv_auth_token: None,
             management: None,
+        }
+    }
+
+    fn load_credentials_from_disk(store_dir: &PathBuf, uid: Option<u32>) -> Vec<Credential> {
+        match store::load_ctap2_credentials_from_dir(store_dir, uid) {
+            Ok(credentials) => credentials
+                .into_iter()
+                .map(|credential| Credential {
+                    id: credential.id,
+                    rp_id: credential.rp_id,
+                    discoverable: credential.discoverable,
+                    user_id: credential.user_id,
+                    user_handle: credential.user_handle,
+                    user_name: credential.user_name,
+                    user_display_name: credential.user_display_name,
+                    key: tpm::TpmCredential {
+                        private: credential.key.private,
+                        public: credential.key.public,
+                        public_key_x: credential.key.public_key_x,
+                        public_key_y: credential.key.public_key_y,
+                        auth_value: credential.key.auth_value,
+                    },
+                    policy: credential.policy,
+                    recovery: credential.recovery,
+                    sign_count: credential.sign_count,
+                })
+                .collect(),
+            Err(error) => {
+                log::warn!("failed to reload CTAP2 credential store: {error:?}");
+                Vec::new()
+            }
         }
     }
 
@@ -468,6 +473,11 @@ impl Authenticator {
         let uv_requested = options.is_some_and(|options| map_bool(options, "uv") == Some(true));
         validate_credential_descriptor_list(allow_list)?;
 
+        // Reload credentials from disk when running as daemon (tpm_path is set)
+        // to pick up management-side modifications (e.g., update-pcr-reference).
+        if self.tpm_path.is_some() {
+            self.credentials = Self::load_credentials_from_disk(&self.store_dir, self.session.uid);
+        }
         let credential_indexes = matching_credential_indexes(&self.credentials, rp_id, allow_list);
         let Some((&credential_index, remaining_indexes)) = credential_indexes.split_first() else {
             return Err(ErrorStatus::NoCredentials);
@@ -1222,10 +1232,15 @@ impl Authenticator {
     fn ensure_tpm(&mut self) -> Option<&mut tpm::Tpm> {
         if self.tpm.is_none() {
             let path = self.tpm_path.clone()?;
+            let pcr_indices = store::load_default_pcr_policy(&self.store_dir).unwrap_or(None);
 
             for attempt in 0..100 {
-                match tpm::Tpm::open(&path) {
+                match tpm::Tpm::open(&path, pcr_indices.as_deref()) {
                     Ok(tpm) => {
+                        log::info!(
+                            "TPM opened with PCR policy {:?}",
+                            pcr_indices.as_deref().unwrap_or(&[7])
+                        );
                         self.tpm = Some(tpm);
                         break;
                     }
@@ -1320,6 +1335,62 @@ impl Authenticator {
             Err(ErrorStatus::PinAuthInvalid)
         }
     }
+
+    /// Execute a TPM command issued by the management thread.
+    /// This runs on the main daemon thread which owns the TPM context.
+    pub fn handle_tpm_command(&mut self, command: TpmCommand) -> color_eyre::Result<()> {
+        match command {
+            TpmCommand::PcrPolicyUpdate(cmd) => {
+                let tpm = self
+                    .ensure_tpm()
+                    .ok_or_else(|| color_eyre::eyre::eyre!("TPM not available"))?;
+                let new_policy = tpm
+                    .update_authorized_policy(&cmd.authority, &cmd.authority_name, &cmd.policy_ref)
+                    .wrap_err("updating PCR policy via management TPM command")?;
+                let stored_policy = store::StoredPcrPolicy {
+                    selection: new_policy.selection,
+                    digest: new_policy.digest,
+                    policy_ref: new_policy.policy_ref,
+                    authority_name: new_policy.authority_name,
+                    authority_signature: new_policy.authority_signature,
+                    policy_version: store::StoredPcrPolicy::current_version(),
+                };
+                store::update_ctap2_policy_in_dir(
+                    &self.store_dir,
+                    &cmd.credential_id,
+                    &stored_policy,
+                )
+                .wrap_err("saving PCR policy after TPM command")?;
+                log::info!(
+                    "updated PCR policy for credential {}",
+                    hex::encode(&cmd.credential_id)
+                );
+                Ok(())
+            }
+            TpmCommand::PassphraseChange(cmd) => {
+                let tpm = self
+                    .ensure_tpm()
+                    .ok_or_else(|| color_eyre::eyre::eyre!("TPM not available"))?;
+                let updated_key = tpm
+                    .change_key_auth(&cmd.recovery_key, &cmd.new_passphrase_hash)
+                    .wrap_err("changing TPM recovery key authorization")?;
+                store::update_recovery_slot_in_dir(
+                    &self.store_dir,
+                    &cmd.credential_id,
+                    &updated_key.private,
+                    &cmd.new_salt,
+                    &cmd.new_passphrase_hash,
+                    &cmd.new_kdf,
+                )
+                .wrap_err("saving updated recovery slot after TPM command")?;
+                log::info!(
+                    "changed recovery passphrase for credential {}",
+                    hex::encode(&cmd.credential_id)
+                );
+                Ok(())
+            }
+        }
+    }
 }
 
 impl Default for Authenticator {
@@ -1327,6 +1398,36 @@ impl Default for Authenticator {
         Self::new(store::dev_store_dir(), None)
     }
 }
+
+/// A TPM-bound operation requested by the management thread.
+pub enum TpmCommand {
+    PcrPolicyUpdate(PcrPolicyUpdateCommand),
+    PassphraseChange(PassphraseChangeCommand),
+}
+
+/// Data needed to update a credential's PCR policy via `policy_authorize`.
+pub struct PcrPolicyUpdateCommand {
+    pub credential_id: Vec<u8>,
+    pub authority: tpm::TpmCredential,
+    pub authority_name: Vec<u8>,
+    pub policy_ref: Vec<u8>,
+}
+
+/// Data needed to change a credential's recovery passphrase via `change_key_auth`.
+pub struct PassphraseChangeCommand {
+    pub credential_id: Vec<u8>,
+    pub recovery_key: tpm::TpmCredential,
+    pub new_passphrase_hash: Vec<u8>,
+    pub new_salt: Vec<u8>,
+    pub new_kdf: tpm::RecoveryKdf,
+}
+
+/// Result type for a TPM command sent across threads.
+pub type TpmCmdResult = std::result::Result<(), String>;
+
+/// Channel sender for dispatching TPM commands from the management thread
+/// to the main daemon thread.  Each command carries a one-shot reply channel.
+pub type TpmCmdSender = mpsc::Sender<(TpmCommand, mpsc::Sender<TpmCmdResult>)>;
 
 pub fn command_name(command: Ctap2Command) -> &'static str {
     match command {
@@ -2854,7 +2955,9 @@ pub fn update_pcr_policy_for_credential(
     }
 
     let tpm_path = tpm_path.unwrap_or(&std::path::Path::new("/dev/tpmrm0"));
-    let mut tpm = tpm::Tpm::open(tpm_path).wrap_err("opening TPM for PCR policy update")?;
+    let pcr_indices = store::load_default_pcr_policy(store_dir).unwrap_or(None);
+    let mut tpm = tpm::Tpm::open(tpm_path, pcr_indices.as_deref())
+        .wrap_err("opening TPM for PCR policy update")?;
 
     let authority = tpm::TpmCredential {
         private: recovery.key.private.clone(),
@@ -2927,7 +3030,9 @@ pub fn change_recovery_passphrase(
     let new_hash = tpm::recovery_passphrase_hash(&new_kdf, &new_salt, new_passphrase)?;
 
     let tpm_path = tpm_path.unwrap_or(&std::path::Path::new("/dev/tpmrm0"));
-    let mut tpm = tpm::Tpm::open(tpm_path).wrap_err("opening TPM for passphrase change")?;
+    let pcr_indices = store::load_default_pcr_policy(store_dir).unwrap_or(None);
+    let mut tpm = tpm::Tpm::open(tpm_path, pcr_indices.as_deref())
+        .wrap_err("opening TPM for passphrase change")?;
 
     let recovery_key = tpm::TpmCredential {
         private: recovery.key.private.clone(),

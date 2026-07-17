@@ -232,6 +232,34 @@ pub fn credentials_database_path_in_dir(dir: impl AsRef<Path>) -> PathBuf {
     dir.as_ref().join(CREDENTIALS_DATABASE_FILE)
 }
 
+const DEFAULT_PCR_POLICY_FILE: &str = "default-pcr-policy.json";
+
+pub fn default_pcr_policy_path(dir: impl AsRef<Path>) -> PathBuf {
+    dir.as_ref().join(DEFAULT_PCR_POLICY_FILE)
+}
+
+pub fn load_default_pcr_policy(dir: impl AsRef<Path>) -> Result<Option<Vec<u32>>> {
+    let path = default_pcr_policy_path(dir);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let data = fs::read_to_string(&path)
+        .wrap_err_with(|| format!("reading default PCR policy from {}", path.display()))?;
+    let indices: Vec<u32> = serde_json::from_str(&data)
+        .wrap_err_with(|| format!("parsing default PCR policy from {}", path.display()))?;
+    Ok(Some(indices))
+}
+
+pub fn save_default_pcr_policy(dir: impl AsRef<Path>, indices: &[u32]) -> Result<()> {
+    let path = default_pcr_policy_path(&dir);
+    fs::create_dir_all(dir.as_ref())
+        .wrap_err_with(|| format!("creating store directory {}", dir.as_ref().display()))?;
+    let data = serde_json::to_string(indices).wrap_err("serializing default PCR policy")?;
+    fs::write(&path, data)
+        .wrap_err_with(|| format!("writing default PCR policy to {}", path.display()))?;
+    Ok(())
+}
+
 async fn load_ctap2_credentials_async(
     dir: &Path,
     user_id: Option<u32>,

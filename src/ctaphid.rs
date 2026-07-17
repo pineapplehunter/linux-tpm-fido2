@@ -84,6 +84,15 @@ impl PacketHandler {
         }
     }
 
+    /// Execute a TPM command from the management thread, using the
+    /// authenticator's already-open TPM context.
+    pub fn handle_tpm_command(
+        &mut self,
+        command: crate::ctap2::TpmCommand,
+    ) -> color_eyre::Result<()> {
+        self.authenticator.handle_tpm_command(command)
+    }
+
     pub fn handle_packet(&mut self, report: &[u8]) -> Option<PacketOutcome> {
         if report.len() != REPORT_SIZE {
             return None;

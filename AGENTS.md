@@ -38,3 +38,46 @@
 - Firefox on Linux is the first browser target.
 - When using sqlx, prefer to use the "query!" macro for readability instead of query function.
 - Never overwrite an existing migration SQL file. Only add new migration files.
+
+## Known Issues / Debugging History
+
+### NixOS VM test only uses `/dev/tpm0` (no `/dev/tpmrm0`)
+
+The test VM (`nix/nixos-test-polkit.nix`) uses `virtualisation.tpm.enable = true` (swtpm),
+which provides `/dev/tpm0` but *not* `/dev/tpmrm0`.  On bare metal with a real TPM 2.0,
+the kernel resource-manager driver (`tpmrm`) creates `/dev/tpmrm0`, which supports
+multiple simultaneous openers.  The daemon defaults to `/dev/tpmrm0` in its CLI args,
+but the test VM explicitly uses `/dev/tpm0`.
+
+Since `/dev/tpm0` only allows **one** opener at a time, management subcommands that
+try to open a second TPM context (e.g. `update-pcr-reference`) fail with
+`Tss2_Tcti_Device_Init() … Device or resource busy`.
+
+### Fix: TPM command channel (management → main daemon thread)
+
+Management commands that need TPM access now send a `TpmCommand` over an
+`mpsc` channel to the main daemon loop, which owns the lone TPM context.
+
+Relevant types in `src/ctap2.rs`:
+  - `TpmCommand::PcrPolicyUpdate(PcrPolicyUpdateCommand)`
+  - `Authenticator::handle_tpm_command(&mut self, TpmCommand)`
+  - `TpmCmdSender` / `TpmCmdResult`
+
+**`src/main.rs`**:
+  - Creates an `mpsc` channel before spawning the management server.
+  - Every loop iteration calls `tpm_cmd_rx.try_recv()` and, if a command
+    is pending, dispatches it to `ctaphid.handle_tpm_command()`.
+
+**`src/management.rs`**:
+  - `serve()` now accepts `Option<TpmCmdSender>` instead of a TPM device path.
+  - `handle_update_pcr_reference()` validates the passphrase in the management
+    thread, then sends the actual TPM work to the daemon thread.
+  - Falls back to the old direct-TPM-open path when no channel is available
+    (e.g. during unit tests).
+
+### Debug logging in TPM operations
+
+The file `src/tpm.rs` contains several `log::debug!` calls that trace
+PCR-digest computation, policy-authorize signing, and the assertion TPM
+flow.  They are inactive at the default `info` log level and can be
+seen by setting `RUST_LOG=debug`.
